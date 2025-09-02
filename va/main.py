@@ -9,6 +9,8 @@ import speech_recognition as sr
 import json
 import pygetwindow as gw
 import time
+import re
+from difflib import SequenceMatcher
 
 # ---------- LOAD ENV ----------
 load_dotenv()
@@ -17,6 +19,7 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 # ---------- SPEAK ----------
 engine = pyttsx3.init()
 def speak(text):
+    print("Assistant:", text)
     engine.say(text)
     engine.runAndWait()
 
@@ -24,8 +27,93 @@ def speak(text):
 context = {
     "last_app": None,       # e.g., "chrome", "notepad"
     "last_action": None,    # e.g., "open_app", "youtube_search"
-    "last_folder": None     # e.g., "C:\\Users\\User\\Downloads"
+    "last_folder": None,    # e.g., "C:\\Users\\User\\Downloads"
+    "last_file": None       # e.g., "C:\\Users\\User\\Downloads\\report.pdf"
 }
+
+# ---------- NORMALIZATION / MATCHING HELPERS ----------
+EXT_WORDS = {
+    "pdf","doc","docx","ppt","pptx","xls","xlsx","txt",
+    "png","jpg","jpeg","csv","json","mp3","mp4","mkv","py","zip","rar","7z"
+}
+
+def normalize_text(s: str) -> str:
+    """
+    Lowercase, drop extension, remove spaces/underscores/punctuation.
+    Works so 'hindi pdf' ~ 'hindipdf.pdf'
+    """
+    s = s.lower()
+    s = os.path.splitext(s)[0]
+    s = re.sub(r'[\W_]+', '', s, flags=re.UNICODE)
+    return s
+
+def extract_query_and_ext(file_query: str):
+    """
+    From 'hindi pdf' -> ('hindipdf', 'pdf')
+    From 'annual report' -> ('annualreport', None)
+    """
+    tokens = re.findall(r'\w+', file_query.lower())
+    ext = None
+    for t in tokens[::-1]:
+        if t in EXT_WORDS:
+            ext = t
+            break
+    core_tokens = [t for t in tokens if t not in EXT_WORDS]
+    core_query = ''.join(core_tokens)  # already lowercased tokens, no spaces
+    return core_query, ext
+
+def rank_matches(files, folder_path, raw_query):
+    """
+    Rank files by:
+      - substring match on normalized names
+      - fuzzy ratio vs normalized query
+      - token hits
+      - extension preference (if 'pdf' etc. said)
+    Returns a sorted list of filenames (best first).
+    """
+    q_norm_core, ext_hint = extract_query_and_ext(raw_query)
+    # Also keep tokens for a light token containment score
+    tokens = re.findall(r'\w+', raw_query.lower())
+    tokens = [t for t in tokens if t not in EXT_WORDS]
+
+    ranked = []
+    for f in files:
+        full = os.path.join(folder_path, f)
+        if not os.path.isfile(full):
+            continue
+
+        # Extension preference filtering (soft): first try with ext, later we’ll fallback
+        f_lower = f.lower()
+        if ext_hint and not f_lower.endswith("." + ext_hint):
+            # Temporarily skip; we’ll do a no-ext pass if nothing matches
+            continue
+
+        f_norm = normalize_text(f)
+
+        substr = 1.0 if (q_norm_core and q_norm_core in f_norm) else 0.0
+        ratio = SequenceMatcher(None, q_norm_core, f_norm).ratio() if q_norm_core else 0.0
+        token_hits = sum(1 for t in tokens if t and t in f_norm) * 0.15
+
+        score = ratio + substr + token_hits
+        ranked.append((score, f))
+
+    # If no result with ext filter, try again without filtering by extension
+    if not ranked:
+        for f in files:
+            full = os.path.join(folder_path, f)
+            if not os.path.isfile(full):
+                continue
+            f_norm = normalize_text(f)
+            substr = 1.0 if (q_norm_core and q_norm_core in f_norm) else 0.0
+            ratio = SequenceMatcher(None, q_norm_core, f_norm).ratio() if q_norm_core else 0.0
+            token_hits = sum(1 for t in tokens if t and t in f_norm) * 0.15
+            score = ratio + substr + token_hits
+            ranked.append((score, f))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    # Keep only reasonably good matches (threshold keeps results sane but tolerant)
+    ranked = [f for score, f in ranked if score >= 0.55]
+    return ranked
 
 # ---------- GEMINI PARSER ----------
 def parse_command_online(command: str):
@@ -113,18 +201,89 @@ def execute(action, params):
         except Exception:
             speak(f"Could not find or open {app}")
 
-    # ---------- OPEN FILE IN LAST FOLDER ----------
+    # ---------- OPEN FILE ----------
     elif action == "open_file":
-        file_name = params.get("file", "")
+        raw_query = params.get("file", "")
         folder_path = context.get("last_folder")
 
         if folder_path:
-            file_path = os.path.join(folder_path, file_name)
-            if os.path.isfile(file_path):
-                os.startfile(file_path)
-                speak(f"Opening {file_name}")
-            else:
-                speak(f"Could not find {file_name} in {folder_path}")
+            try:
+                files = os.listdir(folder_path)
+
+                # Rank using fuzzy logic + normalization
+                matches = rank_matches(files, folder_path, raw_query)
+
+                if not matches:
+                    speak(f"No file matching {raw_query} found in {folder_path}")
+                    return
+
+                # If only one good match → open directly
+                if len(matches) == 1:
+                    chosen_file = matches[0]
+                    file_path = os.path.join(folder_path, chosen_file)
+                    os.startfile(file_path)
+                    speak(f"Opening {chosen_file}")
+                    context["last_file"] = file_path
+                    return
+
+                # If multiple matches → ask user (limit to top 5)
+                limited_matches = matches[:5]
+                speak(f"I found {len(matches)} matching files. Here are the top {len(limited_matches)}:")
+                for i, f in enumerate(limited_matches, start=1):
+                    speak(f"Option {i}: {f}")
+
+                speak("Please say the number or part of the file name you want to open. "
+                      "If you don’t respond, I’ll open the first one.")
+
+                r = sr.Recognizer()
+                with sr.Microphone() as source:
+                    r.adjust_for_ambient_noise(source)
+                    try:
+                        audio = r.listen(source, timeout=5, phrase_time_limit=5)
+                        choice = r.recognize_google(audio).lower()
+                        print("User choice:", choice)
+
+                        chosen_file = None
+
+                        if choice.isdigit():
+                            idx = int(choice) - 1
+                            if 0 <= idx < len(limited_matches):
+                                chosen_file = limited_matches[idx]
+                        else:
+                            # normalize choice too
+                            choice_norm = normalize_text(choice)
+                            for f in limited_matches:
+                                if choice_norm in normalize_text(f):
+                                    chosen_file = f
+                                    break
+
+                        if chosen_file:
+                            file_path = os.path.join(folder_path, chosen_file)
+                            os.startfile(file_path)
+                            speak(f"Opening {chosen_file}")
+                            context["last_file"] = file_path
+                        else:
+                            speak("Couldn’t understand your choice. Opening the first file instead.")
+                            file_path = os.path.join(folder_path, limited_matches[0])
+                            os.startfile(file_path)
+                            speak(f"Opening {limited_matches[0]}")
+                            context["last_file"] = file_path
+
+                    except sr.WaitTimeoutError:
+                        file_path = os.path.join(folder_path, limited_matches[0])
+                        os.startfile(file_path)
+                        speak(f"No response. Opening {limited_matches[0]}")
+                        context["last_file"] = file_path
+                    except Exception as e:
+                        speak("Something went wrong. Opening the first file instead.")
+                        print("Choice error:", e)
+                        file_path = os.path.join(folder_path, limited_matches[0])
+                        os.startfile(file_path)
+                        speak(f"Opening {limited_matches[0]}")
+                        context["last_file"] = file_path
+
+            except Exception as e:
+                speak(f"Error opening file: {e}")
         else:
             speak("No folder context found. Please open a folder first.")
 
@@ -133,8 +292,18 @@ def execute(action, params):
         try:
             src = params.get("source")
             dst = params.get("destination")
+
+            # If no source provided, use last opened file
+            if not src and context.get("last_file"):
+                src = context["last_file"]
+
+            if not src or not dst:
+                speak("Please specify both source and destination.")
+                return
+
             os.rename(src, dst)
             speak("File moved successfully")
+            context["last_file"] = dst
         except Exception as e:
             speak(f"Failed to move file: {e}")
 
