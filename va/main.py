@@ -11,6 +11,7 @@ import pygetwindow as gw
 import time
 import re
 from difflib import SequenceMatcher
+from send2trash import send2trash  # for deleting files safely
 
 # ---------- LOAD ENV ----------
 load_dotenv()
@@ -25,10 +26,10 @@ def speak(text):
 
 # ---------- GLOBAL CONTEXT ----------
 context = {
-    "last_app": None,       # e.g., "chrome", "notepad"
-    "last_action": None,    # e.g., "open_app", "youtube_search"
-    "last_folder": None,    # e.g., "C:\\Users\\User\\Downloads"
-    "last_file": None       # e.g., "C:\\Users\\User\\Downloads\\report.pdf"
+    "last_app": None,
+    "last_action": None,
+    "last_folder": None,
+    "last_file": None
 }
 
 # ---------- NORMALIZATION / MATCHING HELPERS ----------
@@ -38,20 +39,12 @@ EXT_WORDS = {
 }
 
 def normalize_text(s: str) -> str:
-    """
-    Lowercase, drop extension, remove spaces/underscores/punctuation.
-    Works so 'hindi pdf' ~ 'hindipdf.pdf'
-    """
     s = s.lower()
     s = os.path.splitext(s)[0]
     s = re.sub(r'[\W_]+', '', s, flags=re.UNICODE)
     return s
 
 def extract_query_and_ext(file_query: str):
-    """
-    From 'hindi pdf' -> ('hindipdf', 'pdf')
-    From 'annual report' -> ('annualreport', None)
-    """
     tokens = re.findall(r'\w+', file_query.lower())
     ext = None
     for t in tokens[::-1]:
@@ -59,20 +52,11 @@ def extract_query_and_ext(file_query: str):
             ext = t
             break
     core_tokens = [t for t in tokens if t not in EXT_WORDS]
-    core_query = ''.join(core_tokens)  # already lowercased tokens, no spaces
+    core_query = ''.join(core_tokens)
     return core_query, ext
 
 def rank_matches(files, folder_path, raw_query):
-    """
-    Rank files by:
-      - substring match on normalized names
-      - fuzzy ratio vs normalized query
-      - token hits
-      - extension preference (if 'pdf' etc. said)
-    Returns a sorted list of filenames (best first).
-    """
     q_norm_core, ext_hint = extract_query_and_ext(raw_query)
-    # Also keep tokens for a light token containment score
     tokens = re.findall(r'\w+', raw_query.lower())
     tokens = [t for t in tokens if t not in EXT_WORDS]
 
@@ -81,23 +65,16 @@ def rank_matches(files, folder_path, raw_query):
         full = os.path.join(folder_path, f)
         if not os.path.isfile(full):
             continue
-
-        # Extension preference filtering (soft): first try with ext, later we’ll fallback
         f_lower = f.lower()
         if ext_hint and not f_lower.endswith("." + ext_hint):
-            # Temporarily skip; we’ll do a no-ext pass if nothing matches
             continue
-
         f_norm = normalize_text(f)
-
         substr = 1.0 if (q_norm_core and q_norm_core in f_norm) else 0.0
         ratio = SequenceMatcher(None, q_norm_core, f_norm).ratio() if q_norm_core else 0.0
         token_hits = sum(1 for t in tokens if t and t in f_norm) * 0.15
-
         score = ratio + substr + token_hits
         ranked.append((score, f))
 
-    # If no result with ext filter, try again without filtering by extension
     if not ranked:
         for f in files:
             full = os.path.join(folder_path, f)
@@ -111,9 +88,22 @@ def rank_matches(files, folder_path, raw_query):
             ranked.append((score, f))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
-    # Keep only reasonably good matches (threshold keeps results sane but tolerant)
     ranked = [f for score, f in ranked if score >= 0.55]
     return ranked
+
+def find_file_in_folder(file_name, folder_path):
+    """
+    Search for a file matching `file_name` in `folder_path`.
+    Returns the full path of the first match or None.
+    """
+    try:
+        files = os.listdir(folder_path)
+        matches = rank_matches(files, folder_path, file_name)
+        if matches:
+            return os.path.join(folder_path, matches[0])
+    except Exception as e:
+        print("Find file error:", e)
+    return None
 
 # ---------- GEMINI PARSER ----------
 def parse_command_online(command: str):
@@ -137,15 +127,12 @@ def parse_command_online(command: str):
 
     Respond ONLY in JSON.
     """
-
     try:
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
         text = response.text.strip()
-
         if text.startswith("```"):
             text = text.replace("```json", "").replace("```", "").strip()
-
         return json.loads(text)
     except Exception as e:
         print("Parsing error:", e)
@@ -164,22 +151,22 @@ def execute(action, params):
         "videos": "videos", "video": "videos", "movies": "videos"
     }
 
+    folder_paths = {
+        "downloads": os.path.expanduser("~\\Downloads"),
+        "documents": os.path.expanduser("~\\Documents"),
+        "desktop": os.path.expanduser("~\\Desktop"),
+        "pictures": os.path.expanduser("~\\Pictures"),
+        "music": os.path.expanduser("~\\Music"),
+        "videos": os.path.expanduser("~\\Videos"),
+        "recycle bin": None
+    }
+
     # ---------- OPEN APP / FOLDER ----------
     if action == "open_app":
         app = params.get("app", "").lower()
         app = folder_map.get(app, app)
 
-        folder_paths = {
-            "downloads": os.path.expanduser("~\\Downloads"),
-            "documents": os.path.expanduser("~\\Documents"),
-            "desktop": os.path.expanduser("~\\Desktop"),
-            "pictures": os.path.expanduser("~\\Pictures"),
-            "music": os.path.expanduser("~\\Music"),
-            "videos": os.path.expanduser("~\\Videos")
-        }
-
-        # If it's a known folder
-        if app in folder_paths:
+        if app in folder_paths and folder_paths[app]:
             try:
                 folder_path = folder_paths[app]
                 os.startfile(folder_path)
@@ -191,7 +178,6 @@ def execute(action, params):
                 speak(f"Failed to open {app}: {e}")
             return
 
-        # Otherwise, try as executable
         try:
             ps_command = f"Start-Process '{app}'"
             subprocess.Popen(["powershell", "-Command", ps_command])
@@ -205,82 +191,51 @@ def execute(action, params):
     elif action == "open_file":
         raw_query = params.get("file", "")
         folder_path = context.get("last_folder")
-
         if folder_path:
             try:
                 files = os.listdir(folder_path)
-
-                # Rank using fuzzy logic + normalization
                 matches = rank_matches(files, folder_path, raw_query)
-
                 if not matches:
                     speak(f"No file matching {raw_query} found in {folder_path}")
                     return
+                chosen_file = matches[0] if len(matches) == 1 else None
 
-                # If only one good match → open directly
-                if len(matches) == 1:
-                    chosen_file = matches[0]
-                    file_path = os.path.join(folder_path, chosen_file)
-                    os.startfile(file_path)
-                    speak(f"Opening {chosen_file}")
-                    context["last_file"] = file_path
-                    return
+                if not chosen_file:
+                    limited_matches = matches[:5]
+                    speak(f"I found {len(matches)} matching files. Top {len(limited_matches)}:")
+                    for i, f in enumerate(limited_matches, start=1):
+                        speak(f"Option {i}: {f}")
 
-                # If multiple matches → ask user (limit to top 5)
-                limited_matches = matches[:5]
-                speak(f"I found {len(matches)} matching files. Here are the top {len(limited_matches)}:")
-                for i, f in enumerate(limited_matches, start=1):
-                    speak(f"Option {i}: {f}")
+                    speak("Say the number or part of the file name to open (5s to respond)...")
+                    r = sr.Recognizer()
+                    with sr.Microphone() as source:
+                        r.adjust_for_ambient_noise(source)
+                        try:
+                            audio = r.listen(source, timeout=5, phrase_time_limit=5)
+                            choice = r.recognize_google(audio).lower()
+                            print("User choice:", choice)
+                            if choice.isdigit():
+                                idx = int(choice) - 1
+                                if 0 <= idx < len(limited_matches):
+                                    chosen_file = limited_matches[idx]
+                            else:
+                                choice_norm = normalize_text(choice)
+                                for f in limited_matches:
+                                    if choice_norm in normalize_text(f):
+                                        chosen_file = f
+                                        break
+                        except sr.WaitTimeoutError:
+                            speak("No response detected. Opening the first file.")
+                            chosen_file = limited_matches[0]
+                        except Exception as e:
+                            print("Choice error:", e)
+                            speak("Error. Opening first file.")
+                            chosen_file = limited_matches[0]
 
-                speak("Please say the number or part of the file name you want to open. "
-                      "If you don’t respond, I’ll open the first one.")
-
-                r = sr.Recognizer()
-                with sr.Microphone() as source:
-                    r.adjust_for_ambient_noise(source)
-                    try:
-                        audio = r.listen(source, timeout=5, phrase_time_limit=5)
-                        choice = r.recognize_google(audio).lower()
-                        print("User choice:", choice)
-
-                        chosen_file = None
-
-                        if choice.isdigit():
-                            idx = int(choice) - 1
-                            if 0 <= idx < len(limited_matches):
-                                chosen_file = limited_matches[idx]
-                        else:
-                            # normalize choice too
-                            choice_norm = normalize_text(choice)
-                            for f in limited_matches:
-                                if choice_norm in normalize_text(f):
-                                    chosen_file = f
-                                    break
-
-                        if chosen_file:
-                            file_path = os.path.join(folder_path, chosen_file)
-                            os.startfile(file_path)
-                            speak(f"Opening {chosen_file}")
-                            context["last_file"] = file_path
-                        else:
-                            speak("Couldn’t understand your choice. Opening the first file instead.")
-                            file_path = os.path.join(folder_path, limited_matches[0])
-                            os.startfile(file_path)
-                            speak(f"Opening {limited_matches[0]}")
-                            context["last_file"] = file_path
-
-                    except sr.WaitTimeoutError:
-                        file_path = os.path.join(folder_path, limited_matches[0])
-                        os.startfile(file_path)
-                        speak(f"No response. Opening {limited_matches[0]}")
-                        context["last_file"] = file_path
-                    except Exception as e:
-                        speak("Something went wrong. Opening the first file instead.")
-                        print("Choice error:", e)
-                        file_path = os.path.join(folder_path, limited_matches[0])
-                        os.startfile(file_path)
-                        speak(f"Opening {limited_matches[0]}")
-                        context["last_file"] = file_path
+                file_path = os.path.join(folder_path, chosen_file)
+                os.startfile(file_path)
+                speak(f"Opening {chosen_file}")
+                context["last_file"] = file_path
 
             except Exception as e:
                 speak(f"Error opening file: {e}")
@@ -293,7 +248,6 @@ def execute(action, params):
             src = params.get("source")
             dst = params.get("destination")
 
-            # If no source provided, use last opened file
             if not src and context.get("last_file"):
                 src = context["last_file"]
 
@@ -301,9 +255,30 @@ def execute(action, params):
                 speak("Please specify both source and destination.")
                 return
 
-            os.rename(src, dst)
-            speak("File moved successfully")
-            context["last_file"] = dst
+            # Search for source in last folder
+            last_folder = context.get("last_folder", os.path.expanduser("~"))
+            src_full = src if os.path.isabs(src) else find_file_in_folder(src, last_folder)
+
+            if not src_full:
+                speak(f"File not found: {src}")
+                return
+
+            # Map destination folder
+            dst_lower = dst.lower()
+            if dst_lower in folder_paths and folder_paths[dst_lower]:
+                dst_full = os.path.join(folder_paths[dst_lower], os.path.basename(src_full))
+            elif dst_lower == "recycle bin":
+                send2trash(src_full)
+                speak(f"{os.path.basename(src_full)} sent to Recycle Bin")
+                context["last_file"] = None
+                return
+            else:
+                dst_full = dst  # assume full path
+
+            os.rename(src_full, dst_full)
+            speak(f"File moved successfully to {dst_full}")
+            context["last_file"] = dst_full
+
         except Exception as e:
             speak(f"Failed to move file: {e}")
 
@@ -391,7 +366,6 @@ def execute(action, params):
                 speak(f"No open windows found for {app_name}")
                 return
             window = windows[0]
-
             if cmd == "close":
                 window.close()
             elif cmd == "minimize":
@@ -421,7 +395,7 @@ def listen_and_execute():
     with sr.Microphone() as source:
         print("Listening...")
         r.adjust_for_ambient_noise(source)
-        audio = r.listen(source)
+        audio = r.listen(source, timeout=5, phrase_time_limit=5)
 
     try:
         command = r.recognize_google(audio)
