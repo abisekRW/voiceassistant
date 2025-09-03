@@ -32,12 +32,15 @@ context = {
     "last_file": None
 }
 
-# ---------- NORMALIZATION / MATCHING HELPERS ----------
+# ---------- FILE EXTENSIONS ----------
 EXT_WORDS = {
     "pdf","doc","docx","ppt","pptx","xls","xlsx","txt",
-    "png","jpg","jpeg","csv","json","mp3","mp4","mkv","py","zip","rar","7z"
+    "png","jpg","jpeg","jfif","csv","json","mp3","mp4","mkv","py","zip","rar","7z"
 }
 
+IMAGE_EXT = {"png","jpg","jpeg","jfif"}
+
+# ---------- NORMALIZATION / MATCHING HELPERS ----------
 def normalize_text(s: str) -> str:
     s = s.lower()
     s = os.path.splitext(s)[0]
@@ -57,45 +60,33 @@ def extract_query_and_ext(file_query: str):
 
 def rank_matches(files, folder_path, raw_query):
     q_norm_core, ext_hint = extract_query_and_ext(raw_query)
-    tokens = re.findall(r'\w+', raw_query.lower())
-    tokens = [t for t in tokens if t not in EXT_WORDS]
+    query_tokens = re.findall(r'\w+', raw_query.lower())
 
     ranked = []
     for f in files:
         full = os.path.join(folder_path, f)
         if not os.path.isfile(full):
             continue
-        f_lower = f.lower()
-        if ext_hint and not f_lower.endswith("." + ext_hint):
-            continue
-        f_norm = normalize_text(f)
-        substr = 1.0 if (q_norm_core and q_norm_core in f_norm) else 0.0
-        ratio = SequenceMatcher(None, q_norm_core, f_norm).ratio() if q_norm_core else 0.0
-        token_hits = sum(1 for t in tokens if t and t in f_norm) * 0.15
-        score = ratio + substr + token_hits
+
+        # Filter by extension if mentioned or if "image" is in query
+        if ext_hint:
+            if not f.lower().endswith("." + ext_hint):
+                continue
+        elif "image" in raw_query.lower() or "photo" in raw_query.lower():
+            if not f.lower().endswith(tuple(IMAGE_EXT)):
+                continue
+
+        f_tokens = re.findall(r'\w+', f.lower())
+        token_hits = sum(1 for qt in query_tokens if qt in f_tokens)
+        ratio = SequenceMatcher(None, q_norm_core, normalize_text(f)).ratio()
+        score = token_hits + ratio
         ranked.append((score, f))
 
-    if not ranked:
-        for f in files:
-            full = os.path.join(folder_path, f)
-            if not os.path.isfile(full):
-                continue
-            f_norm = normalize_text(f)
-            substr = 1.0 if (q_norm_core and q_norm_core in f_norm) else 0.0
-            ratio = SequenceMatcher(None, q_norm_core, f_norm).ratio() if q_norm_core else 0.0
-            token_hits = sum(1 for t in tokens if t and t in f_norm) * 0.15
-            score = ratio + substr + token_hits
-            ranked.append((score, f))
-
     ranked.sort(key=lambda x: x[0], reverse=True)
-    ranked = [f for score, f in ranked if score >= 0.55]
+    ranked = [f for score, f in ranked if score > 0]
     return ranked
 
 def find_file_in_folder(file_name, folder_path):
-    """
-    Search for a file matching `file_name` in `folder_path`.
-    Returns the full path of the first match or None.
-    """
     try:
         files = os.listdir(folder_path)
         matches = rank_matches(files, folder_path, file_name)
@@ -166,6 +157,7 @@ def execute(action, params):
         app = params.get("app", "").lower()
         app = folder_map.get(app, app)
 
+        # Check if folder
         if app in folder_paths and folder_paths[app]:
             try:
                 folder_path = folder_paths[app]
@@ -174,10 +166,23 @@ def execute(action, params):
                 context["last_app"] = app
                 context["last_action"] = "open_app"
                 context["last_folder"] = folder_path
+                return
             except Exception as e:
                 speak(f"Failed to open {app}: {e}")
-            return
+                return
 
+        # Otherwise, search file in known folders
+        for folder in folder_paths.values():
+            if not folder: 
+                continue
+            file_path = find_file_in_folder(app, folder)
+            if file_path:
+                os.startfile(file_path)
+                speak(f"Opening {os.path.basename(file_path)}")
+                context["last_file"] = file_path
+                return
+
+        # Else try executable
         try:
             ps_command = f"Start-Process '{app}'"
             subprocess.Popen(["powershell", "-Command", ps_command])
@@ -186,67 +191,28 @@ def execute(action, params):
             context["last_action"] = "open_app"
         except Exception:
             speak(f"Could not find or open {app}")
+        return
 
     # ---------- OPEN FILE ----------
     elif action == "open_file":
-        raw_query = params.get("file", "")
+        raw_query = params.get("file", "").replace(" ", "")
         folder_path = context.get("last_folder")
         if folder_path:
-            try:
-                files = os.listdir(folder_path)
-                matches = rank_matches(files, folder_path, raw_query)
-                if not matches:
-                    speak(f"No file matching {raw_query} found in {folder_path}")
-                    return
-                chosen_file = matches[0] if len(matches) == 1 else None
-
-                if not chosen_file:
-                    limited_matches = matches[:5]
-                    speak(f"I found {len(matches)} matching files. Top {len(limited_matches)}:")
-                    for i, f in enumerate(limited_matches, start=1):
-                        speak(f"Option {i}: {f}")
-
-                    speak("Say the number or part of the file name to open (5s to respond)...")
-                    r = sr.Recognizer()
-                    with sr.Microphone() as source:
-                        r.adjust_for_ambient_noise(source)
-                        try:
-                            audio = r.listen(source, timeout=5, phrase_time_limit=5)
-                            choice = r.recognize_google(audio).lower()
-                            print("User choice:", choice)
-                            if choice.isdigit():
-                                idx = int(choice) - 1
-                                if 0 <= idx < len(limited_matches):
-                                    chosen_file = limited_matches[idx]
-                            else:
-                                choice_norm = normalize_text(choice)
-                                for f in limited_matches:
-                                    if choice_norm in normalize_text(f):
-                                        chosen_file = f
-                                        break
-                        except sr.WaitTimeoutError:
-                            speak("No response detected. Opening the first file.")
-                            chosen_file = limited_matches[0]
-                        except Exception as e:
-                            print("Choice error:", e)
-                            speak("Error. Opening first file.")
-                            chosen_file = limited_matches[0]
-
-                file_path = os.path.join(folder_path, chosen_file)
+            file_path = find_file_in_folder(raw_query, folder_path)
+            if file_path:
                 os.startfile(file_path)
-                speak(f"Opening {chosen_file}")
+                speak(f"Opening {os.path.basename(file_path)}")
                 context["last_file"] = file_path
-
-            except Exception as e:
-                speak(f"Error opening file: {e}")
+            else:
+                speak(f"No matching file found for {raw_query}")
         else:
             speak("No folder context found. Please open a folder first.")
 
     # ---------- MOVE FILE ----------
     elif action == "move_file":
         try:
-            src = params.get("source")
-            dst = params.get("destination")
+            src = params.get("source", "").replace(" ", "")
+            dst = params.get("destination", "")
 
             if not src and context.get("last_file"):
                 src = context["last_file"]
@@ -255,7 +221,6 @@ def execute(action, params):
                 speak("Please specify both source and destination.")
                 return
 
-            # Search for source in last folder
             last_folder = context.get("last_folder", os.path.expanduser("~"))
             src_full = src if os.path.isabs(src) else find_file_in_folder(src, last_folder)
 
@@ -263,7 +228,6 @@ def execute(action, params):
                 speak(f"File not found: {src}")
                 return
 
-            # Map destination folder
             dst_lower = dst.lower()
             if dst_lower in folder_paths and folder_paths[dst_lower]:
                 dst_full = os.path.join(folder_paths[dst_lower], os.path.basename(src_full))
@@ -273,7 +237,7 @@ def execute(action, params):
                 context["last_file"] = None
                 return
             else:
-                dst_full = dst  # assume full path
+                dst_full = dst
 
             os.rename(src_full, dst_full)
             speak(f"File moved successfully to {dst_full}")
@@ -299,43 +263,15 @@ def execute(action, params):
     # ---------- YOUTUBE SEARCH ----------
     elif action == "youtube_search":
         query = params.get("query", "")
-        browser = context.get("last_app")
-        if browser in ["chrome", "firefox", "edge"]:
-            windows = gw.getWindowsWithTitle(browser)
-            if windows:
-                windows[0].activate()
-                pyautogui.hotkey("ctrl", "t")
-                time.sleep(0.2)
-                pyautogui.typewrite(f"https://www.youtube.com/results?search_query={query}")
-                pyautogui.press("enter")
-                speak(f"Searching YouTube for {query} in {browser}")
-            else:
-                webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
-                speak(f"Searching YouTube for {query}")
-        else:
-            webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
-            speak(f"Searching YouTube for {query}")
+        webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
+        speak(f"Searching YouTube for {query}")
         context["last_action"] = "youtube_search"
 
     # ---------- WEB SEARCH ----------
     elif action == "web_search":
         query = params.get("query", "")
-        browser = context.get("last_app")
-        if browser in ["chrome", "firefox", "edge"]:
-            windows = gw.getWindowsWithTitle(browser)
-            if windows:
-                windows[0].activate()
-                pyautogui.hotkey("ctrl", "t")
-                time.sleep(0.2)
-                pyautogui.typewrite(f"https://www.google.com/search?q={query}")
-                pyautogui.press("enter")
-                speak(f"Searching Google for {query} in {browser}")
-            else:
-                webbrowser.open(f"https://www.google.com/search?q={query}")
-                speak(f"Searching Google for {query}")
-        else:
-            webbrowser.open(f"https://www.google.com/search?q={query}")
-            speak(f"Searching Google for {query}")
+        webbrowser.open(f"https://www.google.com/search?q={query}")
+        speak(f"Searching Google for {query}")
         context["last_action"] = "web_search"
 
     # ---------- YOUTUBE CONTROL ----------
@@ -366,6 +302,7 @@ def execute(action, params):
                 speak(f"No open windows found for {app_name}")
                 return
             window = windows[0]
+
             if cmd == "close":
                 window.close()
             elif cmd == "minimize":
