@@ -8,8 +8,10 @@ from dotenv import load_dotenv
 import speech_recognition as sr
 import json
 import pygetwindow as gw
-import time
 import re
+import numpy as np
+import sounddevice as sd
+import noisereduce as nr
 from difflib import SequenceMatcher
 from send2trash import send2trash  # for deleting files safely
 
@@ -37,7 +39,6 @@ EXT_WORDS = {
     "pdf","doc","docx","ppt","pptx","xls","xlsx","txt",
     "png","jpg","jpeg","jfif","csv","json","mp3","mp4","mkv","py","zip","rar","7z"
 }
-
 IMAGE_EXT = {"png","jpg","jpeg","jfif"}
 
 # ---------- NORMALIZATION / MATCHING HELPERS ----------
@@ -67,15 +68,12 @@ def rank_matches(files, folder_path, raw_query):
         full = os.path.join(folder_path, f)
         if not os.path.isfile(full):
             continue
-
-        # Filter by extension if mentioned or if "image" is in query
         if ext_hint:
             if not f.lower().endswith("." + ext_hint):
                 continue
         elif "image" in raw_query.lower() or "photo" in raw_query.lower():
             if not f.lower().endswith(tuple(IMAGE_EXT)):
                 continue
-
         f_tokens = re.findall(r'\w+', f.lower())
         token_hits = sum(1 for qt in query_tokens if qt in f_tokens)
         ratio = SequenceMatcher(None, q_norm_core, normalize_text(f)).ratio()
@@ -106,6 +104,7 @@ def parse_command_online(command: str):
     - open_app → open an app or a system folder (params: app)
     - open_file → open a file in the last opened folder (params: file)
     - move_file → move a file (params: source, destination)
+    - delete_file → delete a file (params: file)
     - shutdown → shut down the system
     - restart → restart the system
     - screenshot → take a screenshot (params: optional path)
@@ -113,6 +112,8 @@ def parse_command_online(command: str):
     - youtube_control → control playback (params: command: play, pause, stop, next, previous, volume_up, volume_down)
     - web_search → search the internet on Google (params: query)
     - app_control → control open apps/windows (params: app, command: close, minimize, maximize, restore, focus)
+    - list_files → list all files in the last opened folder (params: none)
+
 
     Instruction: "{command}"
 
@@ -132,7 +133,6 @@ def parse_command_online(command: str):
 # ---------- EXECUTE ----------
 def execute(action, params):
     global context
-
     folder_map = {
         "download": "downloads", "downloads": "downloads",
         "documents": "documents", "document": "documents",
@@ -141,7 +141,6 @@ def execute(action, params):
         "music": "music", "songs": "music", "audio": "music",
         "videos": "videos", "video": "videos", "movies": "videos"
     }
-
     folder_paths = {
         "downloads": os.path.expanduser("~\\Downloads"),
         "documents": os.path.expanduser("~\\Documents"),
@@ -192,6 +191,31 @@ def execute(action, params):
         except Exception:
             speak(f"Could not find or open {app}")
         return
+    
+        # ---------- LIST FILES ----------
+    elif action == "list_files":
+        folder_path = context.get("last_folder")
+        if not folder_path:
+            speak("No folder is currently open. Please open a folder first.")
+            return
+
+        try:
+            files = os.listdir(folder_path)
+            if not files:
+                speak("This folder is empty.")
+                return
+
+            print("\n📂 Files in", folder_path, ":")
+            for f in files:
+                print("-", f)
+
+            # Read out only first few to avoid speaking too long
+            preview = ", ".join(files[:5])
+            speak(f"I found {len(files)} files. Some of them are: {preview}")
+
+        except Exception as e:
+            speak(f"Failed to list files: {e}")
+
 
     # ---------- OPEN FILE ----------
     elif action == "open_file":
@@ -245,6 +269,29 @@ def execute(action, params):
 
         except Exception as e:
             speak(f"Failed to move file: {e}")
+
+        # ---------- DELETE FILE ----------
+    elif action == "delete_file":
+        try:
+            raw_query = params.get("file", "").replace(" ", "")
+            folder_path = context.get("last_folder")
+
+            if not folder_path:
+                speak("No folder context found. Please open a folder first.")
+                return
+
+            file_path = find_file_in_folder(raw_query, folder_path)
+            if not file_path:
+                speak(f"No matching file found for {raw_query}")
+                return
+
+            send2trash(file_path)
+            speak(f"{os.path.basename(file_path)} sent to Recycle Bin")
+            context["last_file"] = None
+
+        except Exception as e:
+            speak(f"Failed to delete file: {e}")
+
 
     # ---------- SHUTDOWN / RESTART ----------
     elif action == "shutdown":
@@ -326,20 +373,45 @@ def execute(action, params):
     else:
         speak("Sorry, I don’t understand that command.")
 
+    
+
+# ---------- RECORD WITH NOISE REDUCTION ----------
+def record_with_noise_suppression(duration=5, samplerate=16000):
+    print("🎤 Calibrating background noise (1s)...")
+    noise_sample = sd.rec(int(1 * samplerate), samplerate=samplerate, channels=1, dtype="int16")
+    sd.wait()
+
+    print("🎤 Recording with noise reduction...")
+    recording = sd.rec(int(duration * samplerate), samplerate=samplerate, channels=1, dtype="int16")
+    sd.wait()
+
+    # Flatten audio arrays
+    noise_sample = noise_sample.flatten()
+    voice_sample = recording.flatten()
+
+    # Apply noise reduction using the background profile
+    reduced = nr.reduce_noise(y=voice_sample, y_noise=noise_sample, sr=samplerate)
+
+    return reduced.astype(np.int16)
+
 # ---------- LISTEN & EXECUTE ----------
 def listen_and_execute():
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Listening...")
-        r.adjust_for_ambient_noise(source)
-        audio = r.listen(source, timeout=5, phrase_time_limit=5)
-
     try:
-        command = r.recognize_google(audio)
+        # Record & denoise
+        audio_data = record_with_noise_suppression(duration=5)
+
+        # Convert to AudioData for recognizer
+        r = sr.Recognizer()
+        audio_clean = sr.AudioData(audio_data.tobytes(), sample_rate=16000, sample_width=2)
+
+        # Google Speech Recognition
+        command = r.recognize_google(audio_clean)
         print("You said:", command)
+
         result = parse_command_online(command)
         print("Gemini output:", result)
         execute(result.get("action"), result.get("params"))
+
     except Exception as e:
         print("Error:", e)
         speak("Sorry, I did not understand that.")
