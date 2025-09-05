@@ -50,7 +50,8 @@ context = {
     "last_action": None,
     "last_folder": None,
     "last_file": None,
-    "folder_contents": {}  # Cache folder contents
+    "folder_contents": {},  # Cache folder contents
+    "last_operation_details": None
 }
 
 # ---------- CONSTANTS ----------
@@ -361,15 +362,22 @@ def normalize_text(s: str) -> str:
     return s
 
 def extract_query_and_ext(file_query: str):
-    """Extract file extension and core query"""
+    """Extract file extension and core query, handling 'PDF' as a type word."""
     tokens = re.findall(r'\w+', file_query.lower())
     ext = None
-    for t in tokens[::-1]:
+    
+    # Check for explicit extension words first
+    potential_ext_tokens = []
+    for t in tokens:
         if t in EXT_WORDS:
             ext = t
-            break
-    core_tokens = [t for t in tokens if t not in EXT_WORDS]
-    core_query = ''.join(core_tokens)
+        else:
+            potential_ext_tokens.append(t)
+            
+    # Remove the found extension from core_tokens only if it was explicit
+    core_tokens = [t for t in potential_ext_tokens if t != ext] if ext else tokens
+    
+    core_query = ' '.join(core_tokens).strip() # Join back with space to maintain word order
     return core_query, ext
 
 def get_folder_contents(folder_path):
@@ -397,41 +405,92 @@ def get_folder_contents(folder_path):
         return {"files": [], "folders": []}
 
 def rank_matches(items, raw_query, item_type="both"):
-    """Enhanced matching with better scoring"""
-    q_norm_core, ext_hint = extract_query_and_ext(raw_query)
-    query_tokens = re.findall(r'\w+', raw_query.lower())
+    """Enhanced matching with better scoring and explicit extension handling"""
+    raw_query_lower = raw_query.lower().strip()
+    
+    # Extract core query and extension hint once
+    q_norm_core, ext_hint = extract_query_and_ext(raw_query_lower)
+    
+    # If the query itself ends with an extension word, prioritize that in ext_hint
+    if not ext_hint:
+        for possible_ext in EXT_WORDS:
+            if raw_query_lower.endswith(f" {possible_ext}"):
+                ext_hint = possible_ext
+                q_norm_core = raw_query_lower.replace(f" {possible_ext}", "").strip()
+                break
+
+    query_tokens = re.findall(r'\w+', q_norm_core) if q_norm_core else []
 
     ranked = []
     for item in items:
-        # Skip if looking for specific type
-        if item_type == "files" and item not in get_folder_contents(context.get("last_folder", "")).get("files", []):
+        # Skip if looking for specific type (existing logic)
+        if item_type == "files" and os.path.isdir(os.path.join(context.get("last_folder", ""), item)):
             continue
-        elif item_type == "folders" and item not in get_folder_contents(context.get("last_folder", "")).get("folders", []):
-            continue
-
-        # Extension filtering
-        if ext_hint and not item.lower().endswith("." + ext_hint):
-            continue
-        elif ("image" in raw_query.lower() or "photo" in raw_query.lower()) and not item.lower().endswith(tuple(IMAGE_EXT)):
+        elif item_type == "folders" and os.path.isfile(os.path.join(context.get("last_folder", ""), item)):
             continue
 
-        # Scoring
-        item_tokens = re.findall(r'\w+', item.lower())
-        token_hits = sum(1 for qt in query_tokens if qt in item_tokens)
-        ratio = SequenceMatcher(None, q_norm_core, normalize_text(item)).ratio()
+        item_lower = item.lower()
+        item_base_name, item_ext = os.path.splitext(item_lower)
+        item_ext = item_ext[1:] # Remove the dot
         
-        # Exact name match gets highest score
-        if item.lower() == raw_query.lower():
-            score = 10
-        elif normalize_text(item) == q_norm_core:
-            score = 8 + token_hits
-        else:
-            score = token_hits * 2 + ratio
+        score = 0
+        
+        # 1. Exact Name Match (highest priority)
+        if item_lower == raw_query_lower:
+            score = 1000 # Very high score for exact match
+        elif item_base_name == q_norm_core and (not ext_hint or item_ext == ext_hint):
+            score = 900 # High score for exact base name + correct/no extension
+        elif normalize_text(item_base_name) == normalize_text(q_norm_core):
+            score = 850 # High score for normalized base name match
 
+        # 2. Strong Containment / Starts With
+        elif raw_query_lower in item_lower:
+            score = 700 + (len(raw_query_lower) / len(item_lower)) * 100 # Penalize longer item names
+        elif item_lower.startswith(raw_query_lower):
+            score = 650
+
+        # 3. Fuzzy matching with SequenceMatcher (ratio of normalized text)
+        norm_item = normalize_text(item_base_name)
+        norm_query = normalize_text(q_norm_core)
+        if norm_item and norm_query:
+            ratio = SequenceMatcher(None, norm_query, norm_item).ratio()
+            score += ratio * 500 # Add significant score based on similarity
+
+        # 4. Keyword/Token matching
+        item_tokens = re.findall(r'\w+', item_base_name)
+        token_hits = sum(1 for qt in query_tokens if qt in item_tokens or any(qt in it for it in item_tokens))
+        score += token_hits * 50
+
+        # 5. Extension filtering (penalty if mismatch, bonus if match)
+        if ext_hint:
+            if item_ext == ext_hint:
+                score += 100 # Bonus for correct extension
+            elif item_ext != ext_hint and item_ext in EXT_WORDS:
+                score -= 200 # Penalty for explicit mismatch
+        
+        # Special handling for "image/photo" and "pdf" type_filter
+        if "image" in raw_query_lower or "photo" in raw_query_lower:
+            if item_ext in IMAGE_EXT:
+                score += 50
+            else:
+                score -= 50
+        elif "pdf" in raw_query_lower:
+             if item_ext == "pdf":
+                 score += 50
+             else:
+                 score -= 50
+        
+        # Ensure only relevant items are considered
         if score > 0:
             ranked.append((score, item))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
+    
+    # Debugging: Print top matches and their scores
+    # print(f"DEBUG: Query: '{raw_query}', Core: '{q_norm_core}', Ext: '{ext_hint}'")
+    # for s, i in ranked[:5]:
+    #     print(f"DEBUG: Item: '{i}', Score: {s}")
+
     return [item for score, item in ranked]
 
 def smart_find_item(query, folder_path=None, item_type="both"):
@@ -528,6 +587,9 @@ Actions:
 - list_files: List contents of a folder, potentially with a filter (e.g., ", show me files in documents", ", list my pictures")
     (params: folder [string, optional], type_filter [string, optional - e.g., 'pdf', 'image', 'document', 'video', 'audio'])
 - exit: Stop the assistant (e.g., ", exit assistant", ", stop listening")
+- restore_file: Restore a file from the recycle bin (e.g., ", restore my report from the recycle bin")
+    (params: file [string, required])
+- undo_last_operation: Undo the last move or delete operation (e.g., ", undo that operation", ", revert last action")
 
 System Folders for 'open_app' or 'list_files': downloads, documents, desktop, pictures, music, videos
 Common File Type Filters: image, video, audio, document, pdf, docx, xlsx, pptx, txt, png, jpg, mp3, mp4
@@ -548,6 +610,8 @@ Examples of 's friendly/casual commands and their JSON parsing:
 "Alright , I'm all done for now. Thanks!" → {{"action":"exit","params":{{}}}}
 ", enaku andha file-ah open pannu." (Tamil example for "open that file") -> {{"action":"open_file","params":{{"file":"andha file"}}}}
 ", intha folder la enna iruku?" (Tamil example for "what's in this folder") -> {{"action":"list_files","params":{{"folder":"intha folder"}}}}
+"Chief, if you could just restore that deleted document from the bin?" → {{"action":"restore_file","params":{{"file":"that deleted document"}}}}
+"Hey , could you undo what I just did, please?" → {{"action":"undo_last_operation","params":{{}}}}
 
 
 Command: "{command}"
@@ -563,6 +627,7 @@ JSON only:
         print(f"Gemini parse failed: {e}")
         return {"action": "unknown", "params": {}} # Return 'unknown' on parsing failure # Return 'unknown' on parsing failure
     
+
 # ---------- ENHANCED FALLBACK PARSER ----------
 def fallback_parser(command: str):
     """Enhanced fallback parser with better patterns"""
@@ -636,6 +701,25 @@ def fallback_parser(command: str):
             pass # No type_filter needed
 
         return {"action": "list_files", "params": params}
+    
+    list_rb_match = re.search(r"(?:list|show)(?: all)?(?: the)?\s+(.*?)\s+(?:in|of)\s+(?:the\s+)?recycle bin", c)
+    if list_rb_match:
+        file_type_query = list_rb_match.group(1).strip()
+        params = {"folder": "Recycle Bin"}
+        
+        # Try to infer type filter (reuse existing logic for list_files)
+        for ext_word in EXT_WORDS:
+            if ext_word in file_type_query:
+                params["type_filter"] = ext_word
+                break
+        
+        if "image" in file_type_query or "photo" in file_type_query:
+            params["type_filter"] = "image"
+        elif "pdf" in file_type_query:
+            params["type_filter"] = "pdf"
+        # ... (add other type filters if needed, similar to existing list_files in fallback) ...
+
+        return {"action": "list_files", "params": params}
 
     # Move/delete operations
     move_match = re.search(r"(?:move|send)\s+(.+?)\s+(?:to|into)\s+(.+)", c)
@@ -645,6 +729,15 @@ def fallback_parser(command: str):
     delete_match = re.search(r"(?:delete|remove|trash)\s+(.+)", c)
     if delete_match:
         return {"action": "delete_file", "params": {"file": delete_match.group(1)}}
+    
+    # Restore file from recycle bin
+    restore_match = re.search(r"(?:restore|recover)\s+(.+?)(?:\s+from\s+(?:the\s+)?recycle bin|\s+from\s+(?:the\s+)?trash)?", c)
+    if restore_match:
+        return {"action": "restore_file", "params": {"file": restore_match.group(1).strip()}}
+    
+    # Undo last operation
+    if any(kw in c for kw in ["undo", "revert last", "go back on that"]):
+        return {"action": "undo_last_operation", "params": {}}
 
     # Open file (generic - this should catch "open myfile.txt" not "open folder")
     open_match = re.search(r"(?:open|launch|start)\s+(.+)", c)
@@ -653,7 +746,6 @@ def fallback_parser(command: str):
         potential_name = open_match.group(1).strip()
         if not any(potential_name.endswith(f".{ext}") for ext in EXT_WORDS) and "folder" not in potential_name and "directory" not in potential_name:
             return {"action": "open_file", "params": {"file": potential_name}}
-
 
     # Web operations
     if "youtube" in c:
@@ -667,7 +759,7 @@ def fallback_parser(command: str):
 
     google_match = re.search(r"(?:google|search)\s+(.+)", c)
     if google_match:
-        return {"action": "web_search", "params": {"query": google_match.group(1)}}
+        return {"action": "web_search", "params": {"query": google_match.group(1)}}    
 
     # System operations
     if any(kw in c for kw in ["shut down", "shutdown", "power off"]):
@@ -693,7 +785,24 @@ def execute(action, params):
         if action == "open_app":
             app = params.get("app", "").strip()
             
-            # First, try system folders
+            if app.lower() == "recycle bin":
+                try:
+                    # Use a shell command to open the Recycle Bin
+                    subprocess.Popen(['explorer', 'shell:RecycleBinFolder'])
+                    speak("Opening Recycle Bin.")
+                    context.update({
+                        "last_app": "Recycle Bin",
+                        "last_action": "open_app", 
+                        "last_folder": None # Recycle Bin isn't a normal folder path for context
+                    })
+                    return
+                except Exception as e:
+                    speak(f"Failed to open Recycle Bin: {e}")
+                    print(f"Error opening Recycle Bin: {e}")
+                    # Continue to dynamic app launcher as a fallback (though it won't work well for recycle bin)
+
+
+            # First, try system folders (existing logic)
             folder_path, mapped = map_folder(app.lower())
             if folder_path and os.path.isdir(folder_path):
                 os.startfile(folder_path)
@@ -706,7 +815,7 @@ def execute(action, params):
                 clear_folder_cache()
                 return
 
-            # Use dynamic app launcher
+            # Use dynamic app launcher (existing logic)
             if execute_open_app_dynamic(app):
                 context.update({"last_app": app, "last_action": "open_app"})
             
@@ -816,9 +925,100 @@ def execute(action, params):
         # ENHANCED LIST FILES
         elif action == "list_files":
             # Check for a 'folder' parameter in the command's params
-            requested_folder_name = params.get("folder") or params.get("parent")
-            type_filter = params.get("type_filter", "").lower() # New: Get type filter
+            requested_folder_name = params.get("folder", "").strip().lower() # Convert to lower for comparison
+            type_filter = params.get("type_filter", "").lower() 
             
+            # --- NEW IMPROVEMENT: Handle Recycle Bin for listing ---
+            if requested_folder_name == "recycle bin":
+                try:
+                    # PowerShell command to list Recycle Bin items
+                    ps_command = f"""
+                    $shell = New-Object -ComObject Shell.Application
+                    $recycleBin = $shell.NameSpace(10) # 10 is the Recycle Bin folder constant
+                    $items = $recycleBin.Items()
+                    
+                    if ($items.Count -eq 0) {{
+                        Write-Output "Recycle Bin is empty."
+                    }} else {{
+                        Write-Output "Recycle Bin Contents:"
+                        $items | ForEach-Object {{ Write-Output "$($_.Name)|$($_.Path)" }} # Output Name|OriginalPath
+                    }}
+                    """
+                    
+                    print("Executing PowerShell command to list Recycle Bin contents...")
+                    result = subprocess.run(
+                        ['powershell', '-Command', ps_command],
+                        capture_output=True,
+                        text=True,
+                        timeout=30 # Increased timeout for potentially large recycle bins
+                    )
+
+                    if result.returncode == 0:
+                        output_lines = result.stdout.splitlines()
+                        rb_items = []
+                        if "Recycle Bin Contents:" in output_lines:
+                            # Parse items from output, skipping debug lines and header
+                            for line in output_lines:
+                                if "|" in line and not line.startswith("DEBUG"):
+                                    name, original_path = line.split("|", 1)
+                                    rb_items.append({"name": name, "original_path": original_path})
+
+                        if not rb_items:
+                            speak("The Recycle Bin is empty.")
+                            context["last_folder"] = None # No standard folder to set
+                            return
+
+                        filtered_rb_items = []
+                        if type_filter:
+                            # Apply filter to Recycle Bin items
+                            for item in rb_items:
+                                item_ext = os.path.splitext(item['name'])[1][1:].lower()
+                                if type_filter == "image":
+                                    if item_ext in IMAGE_EXT: filtered_rb_items.append(item)
+                                elif type_filter == "pdf":
+                                    if item_ext == "pdf": filtered_rb_items.append(item)
+                                elif type_filter == "document": # Generic document filter
+                                    if item_ext in ["doc", "docx", "txt", "rtf"]: filtered_rb_items.append(item)
+                                elif type_filter in EXT_WORDS: # Specific extension
+                                    if item_ext == type_filter: filtered_rb_items.append(item)
+                                # Add more specific type filters as needed
+                                else:
+                                    filtered_rb_items.append(item) # If filter not recognized, include all
+                        else:
+                            filtered_rb_items = rb_items
+
+                        if not filtered_rb_items:
+                            speak(f"No {type_filter} items found in the Recycle Bin.")
+                            context["last_folder"] = None
+                            return
+
+                        print("\n🗑️ Recycle Bin Contents (Filtered):")
+                        for item in filtered_rb_items[:10]: # Limit display
+                            print(f"  - {item['name']} (from {os.path.basename(item['original_path'])})")
+                        
+                        preview_names = [item['name'] for item in filtered_rb_items[:3]]
+                        speak(f"Found {len(filtered_rb_items)} items in the Recycle Bin. Including: {', '.join(preview_names)}")
+                        
+                        context["last_folder"] = None # Recycle Bin is not a standard path
+                        context["last_action"] = "list_files" # Still list_files action
+                        return
+
+                    else:
+                        speak("Failed to list Recycle Bin contents.")
+                        print("PowerShell output:", result.stdout)
+                        if result.stderr:
+                            print("PowerShell error:", result.stderr)
+                        context["last_folder"] = None
+                        return
+
+                except Exception as e:
+                    speak(f"Error listing Recycle Bin contents: {e}")
+                    print(f"Recycle Bin listing error: {e}")
+                    context["last_folder"] = None
+                    return
+            # --- END NEW IMPROVEMENT ---
+
+
             folder_path = None
             if requested_folder_name:
                 # Try to map the requested folder name to a known path
@@ -835,70 +1035,6 @@ def execute(action, params):
             if not folder_path or not os.path.isdir(folder_path):
                 speak("No folder is currently open or specified.")
                 return
-            
-            contents = get_folder_contents(folder_path)
-            folders = contents["folders"]
-            all_files = contents["files"] # Renamed to avoid conflict
-
-            filtered_files = []
-            if type_filter:
-                # Apply filter based on common extensions and keywords
-                if type_filter == "image":
-                    filtered_files = [f for f in all_files if os.path.splitext(f)[1][1:].lower() in IMAGE_EXT]
-                elif type_filter == "pdf":
-                    filtered_files = [f for f in all_files if f.lower().endswith(".pdf")]
-                elif type_filter == "doc" or type_filter == "docx":
-                    filtered_files = [f for f in all_files if f.lower().endswith((".doc", ".docx"))]
-                elif type_filter == "xls" or type_filter == "xlsx":
-                    filtered_files = [f for f in all_files if f.lower().endswith((".xls", ".xlsx"))]
-                elif type_filter == "ppt" or type_filter == "pptx":
-                    filtered_files = [f for f in all_files if f.lower().endswith((".ppt", ".pptx"))]
-                elif type_filter == "txt":
-                    filtered_files = [f for f in all_files if f.lower().endswith(".txt")]
-                elif type_filter == "audio":
-                    filtered_files = [f for f in all_files if os.path.splitext(f)[1][1:].lower() in ["mp3", "wav", "aac"]] # Add more audio types if needed
-                elif type_filter == "video":
-                    filtered_files = [f for f in all_files if os.path.splitext(f)[1][1:].lower() in ["mp4", "mkv", "avi"]] # Add more video types if needed
-                elif type_filter in EXT_WORDS: # For other specific extensions
-                    filtered_files = [f for f in all_files if f.lower().endswith(f".{type_filter}")]
-                else: # Fallback if specific filter not matched
-                    speak(f"Cannot filter by '{type_filter}'. Listing all files.")
-                    filtered_files = all_files
-            else:
-                filtered_files = all_files
-
-            files_to_display = filtered_files
-            
-            if not folders and not files_to_display:
-                speak(f"The folder '{os.path.basename(folder_path)}' is empty or no items match your filter.")
-                return
-            
-            print(f"\n📂 Contents of {os.path.basename(folder_path)}:")
-            if folders:
-                print("📁 Folders:")
-                for f in folders[:10]:  # Limit display
-                    print(f"  - {f}")
-            if files_to_display:
-                print(f"📄 {'Filtered ' if type_filter else ''}Files:")
-                for f in files_to_display[:10]:  # Limit display
-                    print(f"  - {f}")
-            
-            total_items = len(folders) + len(files_to_display)
-            preview_items = (folders + files_to_display)[:3]
-            
-            if type_filter and files_to_display:
-                speak(f"Found {len(files_to_display)} {type_filter} files in {os.path.basename(folder_path)}. Including: {', '.join(preview_items)}")
-            elif type_filter and not files_to_display:
-                speak(f"No {type_filter} files found in {os.path.basename(folder_path)}.")
-            elif not type_filter and total_items > 0:
-                speak(f"Found {total_items} items in {os.path.basename(folder_path)}. Including: {', '.join(preview_items)}")
-            else:
-                speak(f"The folder '{os.path.basename(folder_path)}' is empty.")
-            
-            # Update last_folder if a new one was explicitly listed
-            context["last_folder"] = folder_path
-            context["last_action"] = "list_files"
-            return
 
         # ENHANCED OPEN FILE
         elif action == "open_file":
@@ -983,65 +1119,106 @@ def execute(action, params):
 
         # MOVE FILE - ENHANCED
         elif action == "move_file":
-            src = params.get("source", "").strip()
-            dst = params.get("destination", "").strip()
+            src_query = params.get("source", "").strip()
+            dst_query = params.get("destination", "").strip()
             
             # Use last file if no source specified
-            if not src:
-                src = context.get("last_file", "")
+            if not src_query:
+                src_query = context.get("last_file", "")
             
-            if not src or not dst:
-                speak("Please specify both source and destination.")
+            if not src_query or not dst_query:
+                speak("Please specify both source and destination for moving.")
                 return
             
             # Find source file
             src_path = None
-            if os.path.isabs(src) and os.path.exists(src):
-                src_path = src
+            if os.path.isabs(src_query) and os.path.exists(src_query):
+                src_path = src_query
             else:
                 current_folder = context.get("last_folder")
                 if current_folder:
-                    match, _ = smart_find_item(src, current_folder, "files")
+                    match, _ = smart_find_item(src_query, current_folder, "files")
                     if match:
                         src_path = os.path.join(current_folder, match)
                 
                 if not src_path:
-                    src_path, _ = search_all_folders_for_item(src, "files")
+                    src_path, _ = search_all_folders_for_item(src_query, "files")
             
             if not src_path:
-                speak(f"Source file '{src}' not found.")
+                speak(f"Source file '{src_query}' not found.")
                 return
             
-            # Handle destination
-            if dst.lower() in ["recycle bin", "trash", "bin"]:
-                send2trash(src_path)
-                speak(f"Moved {os.path.basename(src_path)} to recycle bin")
+            # Prepare destination path
+            original_dst_path = None # Will store the actual path if moved
+            
+            if dst_query.lower() in ["recycle bin", "trash", "bin"]:
+                speak("Moving files to recycle bin is now handled by delete_file action.")
+                # You might want to re-route to delete_file if user explicitly says "move to recycle bin"
+                # For now, let's just not record an undo operation for this "move" since send2trash is final
+                try:
+                    send2trash(src_path)
+                    speak(f"Moved {os.path.basename(src_path)} to recycle bin.")
+                    clear_folder_cache()
+                except Exception as e:
+                    speak(f"Failed to move {os.path.basename(src_path)} to recycle bin: {e}")
                 return
             
-            dst_folder, mapped = map_folder(dst.lower())
-            if dst_folder:
-                dst_path = os.path.join(dst_folder, os.path.basename(src_path))
+            dst_folder_path = None
+            # 1. Check if destination is a system folder
+            mapped_path, _ = map_folder(dst_query.lower())
+            if mapped_path and os.path.isdir(mapped_path):
+                dst_folder_path = mapped_path
             else:
-                # Create custom destination
-                if not os.path.isabs(dst):
-                    dst = os.path.join(FOLDER_PATHS["desktop"], dst)
-                os.makedirs(dst, exist_ok=True)
-                dst_path = os.path.join(dst, os.path.basename(src_path))
+                # 2. Check if destination is an existing custom folder in last_folder
+                current_folder = context.get("last_folder")
+                if current_folder:
+                    match, _ = smart_find_item(dst_query, current_folder, "folders")
+                    if match:
+                        dst_folder_path = os.path.join(current_folder, match)
+                # 3. Check if destination is an existing custom folder in all known paths
+                if not dst_folder_path:
+                    found_folder_path, _ = search_all_folders_for_item(dst_query, "folders")
+                    if found_folder_path and os.path.isdir(found_folder_path):
+                        dst_folder_path = found_folder_path
+                
+                # 4. If still not found, assume it's a new folder relative to desktop or create it
+                if not dst_folder_path:
+                    speak(f"Could not find destination folder '{dst_query}'. Creating a new one on desktop.")
+                    dst_folder_path = os.path.join(FOLDER_PATHS["desktop"], dst_query)
+                    os.makedirs(dst_folder_path, exist_ok=True)
+
+
+            if not dst_folder_path:
+                speak(f"Could not determine destination folder for '{dst_query}'.")
+                return
+
+            original_dst_path = os.path.join(dst_folder_path, os.path.basename(src_path))
             
             try:
-                os.replace(src_path, dst_path)
-                speak(f"Moved to {os.path.dirname(dst_path)}")
+                # Store details for undo BEFORE the operation
+                context["last_operation_details"] = {
+                    "action": "move",
+                    "source_path": src_path,
+                    "destination_path": original_dst_path,
+                    "original_parent_folder": os.path.dirname(src_path),
+                    "new_parent_folder": dst_folder_path,
+                    "file_name": os.path.basename(src_path)
+                }
+
+                os.replace(src_path, original_dst_path) # Use os.replace for atomic move
+                speak(f"Moved '{os.path.basename(src_path)}' to '{os.path.basename(dst_folder_path)}'.")
                 context.update({
-                    "last_file": dst_path,
-                    "last_folder": os.path.dirname(dst_path)
+                    "last_file": original_dst_path,
+                    "last_folder": dst_folder_path,
+                    "last_action": "move_file"
                 })
                 clear_folder_cache()
             except Exception as e:
                 speak(f"Failed to move file: {e}")
+                context["last_operation_details"] = None # Clear undo if operation failed
             return
 
-        # DELETE FILE - ENHANCED WITH CONFIRMATION
-                # DELETE FILE - ENHANCED (NO CONFIRMATION)
+        # DELETE FILE
         elif action == "delete_file":
             query = params.get("file", "").strip()
             
@@ -1112,6 +1289,13 @@ def execute(action, params):
             if target_path and os.path.exists(target_path):
                 file_to_delete_name = os.path.basename(target_path)
                 try:
+                    # Store details for undo BEFORE the operation
+                    context["last_operation_details"] = {
+                        "action": "delete",
+                        "deleted_path": target_path,
+                        "original_parent_folder": os.path.dirname(target_path),
+                        "file_name": file_to_delete_name
+                    }
                     send2trash(target_path)
                     speak(f"Deleted {file_to_delete_name} and moved it to the recycle bin.")
                     if context.get("last_file") == target_path:
@@ -1119,8 +1303,155 @@ def execute(action, params):
                     clear_folder_cache()
                 except Exception as e:
                     speak(f"Failed to delete file: {e}")
+                    context["last_operation_details"] = None # Clear undo if operation failed
             else:
                 speak(f"File '{query}' not found for deletion.")
+            return
+        
+        elif action == "restore_file":
+            file_query = params.get("file", "").strip()
+            if not file_query:
+                speak("Please tell me which file to restore from the recycle bin.")
+                return
+
+            try:
+                # Add debug logging for Recycle Bin contents
+                ps_command = f"""
+                $shell = New-Object -ComObject Shell.Application
+                $recycleBin = $shell.NameSpace(10) # 10 is the Recycle Bin folder constant
+
+                # DEBUG: List all item names in the recycle bin for inspection
+                Write-Output "DEBUG: Recycle Bin items found:"
+                $recycleBin.Items() | ForEach-Object {{ Write-Output $_.Name }}
+                Write-Output "DEBUG: --- End Recycle Bin items ---"
+
+                # Find the item by name (case-insensitive and potentially more flexible with *)
+                $fileToRestore = $recycleBin.Items() | Where-Object {{ $_.Name -ilike '*{file_query}*' }} | Select-Object -First 1
+
+                if ($fileToRestore) {{
+                    $fileToRestore.InvokeVerb("Restore")
+                    Write-Output "Restored: $($fileToRestore.Name)"
+                }} else {{
+                    Write-Output "Not found: {file_query}"
+                }}
+                """
+                
+                print(f"Executing PowerShell command to restore file: {file_query}")
+                result = subprocess.run(
+                    ['powershell', '-Command', ps_command],
+                    capture_output=True,
+                    text=True,
+                    timeout=15
+                )
+
+                if result.returncode == 0 and "Restored:" in result.stdout:
+                    restored_name = result.stdout.split("Restored: ")[1].strip()
+                    speak(f"Restored '{restored_name}' from the recycle bin.")
+                    clear_folder_cache()
+                else:
+                    speak(f"Could not find or restore '{file_query}' from the recycle bin. It might be permanently deleted or the name is too generic.")
+                    print("PowerShell output:", result.stdout)
+                    if result.stderr:
+                        print("PowerShell error:", result.stderr)
+
+            except Exception as e:
+                speak(f"Error restoring file from recycle bin: {e}")
+                print(f"Recycle bin restore error: {e}")
+            return
+
+        # NEW: UNDO LAST OPERATION
+        elif action == "undo_last_operation":
+            details = context.get("last_operation_details")
+            if not details:
+                speak("No recent operation to undo.")
+                return
+            
+            op_type = details.get("action")
+            
+            if op_type == "move":
+                source_path = details.get("source_path") # Original location of the file
+                destination_path = details.get("destination_path") # Where it was moved to
+                original_parent_folder = details.get("original_parent_folder")
+                file_name = details.get("file_name")
+
+                if not os.path.exists(destination_path):
+                    speak(f"Cannot undo move: '{file_name}' not found in its new location. It might have been moved again.")
+                    context["last_operation_details"] = None
+                    return
+                
+                try:
+                    # Move it back to its original parent
+                    os.replace(destination_path, source_path)
+                    speak(f"Undo successful. '{file_name}' moved back to '{os.path.basename(original_parent_folder)}'.")
+                    context.update({
+                        "last_file": source_path,
+                        "last_folder": original_parent_folder,
+                        "last_action": "undo_move"
+                    })
+                    context["last_operation_details"] = None # Clear undo after use
+                    clear_folder_cache()
+                except Exception as e:
+                    speak(f"Failed to undo move operation: {e}")
+                    print(f"Undo move error: {e}")
+
+            elif op_type == "delete":
+                deleted_path = details.get("deleted_path")
+                file_name = details.get("file_name")
+                
+                try:
+                    # Add debug logging for Recycle Bin contents
+                    ps_command = f"""
+                    $shell = New-Object -ComObject Shell.Application
+                    $recycleBin = $shell.NameSpace(10) # 10 is the Recycle Bin folder constant
+
+                    # DEBUG: List all item names in the recycle bin for inspection
+                    Write-Output "DEBUG: Recycle Bin items found:"
+                    $recycleBin.Items() | ForEach-Object {{ Write-Output $_.Name }}
+                    Write-Output "DEBUG: --- End Recycle Bin items ---"
+
+                    # Find the item by name (case-insensitive and exact match is better for undo)
+                    # We use -ilike '*{file_name}*' to be flexible, but maybe -eq is better if the file_name is known exactly.
+                    # For `undo delete`, we expect the exact name.
+                    $fileToRestore = $recycleBin.Items() | Where-Object {{ $_.Name -ilike '{file_name}' }} | Select-Object -First 1
+
+                    if ($fileToRestore) {{
+                        $fileToRestore.InvokeVerb("Restore")
+                        Write-Output "Restored: $($fileToRestore.Name)"
+                    }} else {{
+                        Write-Output "Not found: {file_name}"
+                    }}
+                    """
+                    
+                    print(f"Executing PowerShell command to undo delete: {file_name}")
+                    result = subprocess.run(
+                        ['powershell', '-Command', ps_command],
+                        capture_output=True,
+                        text=True,
+                        timeout=15
+                    )
+
+                    if result.returncode == 0 and "Restored:" in result.stdout:
+                        restored_name = result.stdout.split("Restored: ")[1].strip()
+                        speak(f"Undo successful. '{restored_name}' restored from the recycle bin.")
+                        context.update({
+                            "last_file": deleted_path,
+                            "last_folder": details.get("original_parent_folder"),
+                            "last_action": "undo_delete"
+                        })
+                        context["last_operation_details"] = None
+                        clear_folder_cache()
+                    else:
+                        speak(f"Could not undo delete operation for '{file_name}'. It might not be in the recycle bin or the restore command failed.")
+                        print("PowerShell output (undo delete):", result.stdout)
+                        if result.stderr:
+                            print("PowerShell error (undo delete):", result.stderr)
+
+                except Exception as e:
+                    speak(f"Failed to undo delete operation: {e}")
+                    print(f"Undo delete error: {e}")
+
+            else:
+                speak("Cannot undo this type of operation.")
             return
 
         # SYSTEM OPERATIONS
