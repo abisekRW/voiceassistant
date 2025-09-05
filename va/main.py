@@ -50,7 +50,7 @@ context = {
     "last_action": None,
     "last_folder": None,
     "last_file": None,
-    "folder_contents": {},  # Cache folder contents
+    "folder_contents": {},
     "last_operation_details": None
 }
 
@@ -137,7 +137,7 @@ def find_installed_apps():
                                         if best_exe:
                                             exe_path = best_exe
                                         else:
-                                            exe_path = str(exe_files[0])  # Fallback to first exe
+                                            exe_path = str(exe_files[0])
                             except (FileNotFoundError, IndexError):
                                 pass
                         
@@ -166,8 +166,7 @@ def find_installed_apps():
 
 def normalize_app_name(name):
     """Normalize application name for consistent matching"""
-    # Remove common suffixes and prefixes
-    name = re.sub(r'\s*\(.*?\)', '', name)  # Remove parentheses content
+    name = re.sub(r'\s*\(.*?\)', '', name)
     name = re.sub(r'\s*(64-bit|32-bit|x64|x86)', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s*version\s+[\d.]+', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s*v[\d.]+', '', name, flags=re.IGNORECASE)
@@ -377,7 +376,7 @@ def extract_query_and_ext(file_query: str):
     # Remove the found extension from core_tokens only if it was explicit
     core_tokens = [t for t in potential_ext_tokens if t != ext] if ext else tokens
     
-    core_query = ' '.join(core_tokens).strip() # Join back with space to maintain word order
+    core_query = ' '.join(core_tokens).strip()
     return core_query, ext
 
 def get_folder_contents(folder_path):
@@ -435,17 +434,16 @@ def rank_matches(items, raw_query, item_type="both"):
         
         score = 0
         
-        # 1. Exact Name Match (highest priority)
         if item_lower == raw_query_lower:
-            score = 1000 # Very high score for exact match
+            score = 1000
         elif item_base_name == q_norm_core and (not ext_hint or item_ext == ext_hint):
-            score = 900 # High score for exact base name + correct/no extension
+            score = 900
         elif normalize_text(item_base_name) == normalize_text(q_norm_core):
-            score = 850 # High score for normalized base name match
+            score = 850
 
         # 2. Strong Containment / Starts With
         elif raw_query_lower in item_lower:
-            score = 700 + (len(raw_query_lower) / len(item_lower)) * 100 # Penalize longer item names
+            score = 700 + (len(raw_query_lower) / len(item_lower)) * 100
         elif item_lower.startswith(raw_query_lower):
             score = 650
 
@@ -691,7 +689,7 @@ JSON only:
         return json.loads(text)
     except Exception as e:
         print(f"Gemini parse failed: {e}")
-        return {"action": "unknown", "params": {}} # Return 'unknown' on parsing failure # Return 'unknown' on parsing failure
+        return {"action": "unknown", "params": {}}
     
 
 # ---------- ENHANCED FALLBACK PARSER ----------
@@ -1219,8 +1217,6 @@ def execute(action, params):
             
             if dst_query.lower() in ["recycle bin", "trash", "bin"]:
                 speak("Moving files to recycle bin is now handled by delete_file action.")
-                # You might want to re-route to delete_file if user explicitly says "move to recycle bin"
-                # For now, let's just not record an undo operation for this "move" since send2trash is final
                 try:
                     send2trash(src_path)
                     speak(f"Moved {os.path.basename(src_path)} to recycle bin.")
@@ -1369,14 +1365,12 @@ def execute(action, params):
                     clear_folder_cache()
                 except Exception as e:
                     speak(f"Failed to delete file: {e}")
-                    context["last_operation_details"] = None # Clear undo if operation failed
+                    context["last_operation_details"] = None
             else:
                 speak(f"File '{query}' not found for deletion.")
             return
         
-        #
         # --- MODIFIED RESTORE FILE ACTION ---
-        #
         elif action == "restore_file":
             file_query = params.get("file", "").strip()
             if not file_query:
@@ -1388,16 +1382,12 @@ def execute(action, params):
             
             if success:
                 speak(f"Successfully restored '{result_msg}'.")
-                # We don't know where it was restored to, so we can't update context easily
-                # But we can clear the cache so the restored file is found on the next scan
                 clear_folder_cache()
             else:
                 speak(f"Failed to restore the file. Reason: {result_msg}")
             return
 
-        #
         # --- MODIFIED UNDO LAST OPERATION ACTION ---
-        #
         elif action == "undo_last_operation":
             details = context.get("last_operation_details")
             if not details:
@@ -1407,8 +1397,8 @@ def execute(action, params):
             op_type = details.get("action")
             
             if op_type == "move":
-                source_path = details.get("source_path") # Original location of the file
-                destination_path = details.get("destination_path") # Where it was moved to
+                source_path = details.get("source_path")
+                destination_path = details.get("destination_path")
                 original_parent_folder = details.get("original_parent_folder")
                 file_name = details.get("file_name")
 
@@ -1495,18 +1485,39 @@ def execute(action, params):
         
         # APP CONTROL
         elif action == "app_control":
-            app_name = params.get("app", context.get("last_app", ""))
-            command = params.get("command", "")
+            app_name_query = params.get("app", context.get("last_app", "")).strip().lower()
+            command = params.get("command", "").strip().lower()
+
+            if not app_name_query:
+                speak("Please specify which application to control.")
+                return
+            if not command in ["close", "minimize", "maximize", "restore"]:
+                speak(f"Command '{command}' is not supported.")
+                return
+
+            # Map folder aliases like "downloads" to their proper window title "Downloads"
+            window_title_to_find = FOLDER_MAP.get(app_name_query, app_name_query).capitalize()
+
             try:
-                windows = gw.getWindowsWithTitle(app_name)
+                # Find all windows that contain the title
+                windows = gw.getWindowsWithTitle(window_title_to_find)
                 if windows:
-                    window = windows
-                    getattr(window, command, lambda: None)()
-                    speak(f"{command} executed on {app_name}")
+                    for window in windows:
+                        # Perform the action on each window found
+                        if command == "close":
+                            window.close()
+                        elif command == "minimize":
+                            window.minimize()
+                        elif command == "maximize":
+                            window.maximize()
+                        elif command == "restore":
+                            window.restore()
+                    speak(f"Action '{command}' executed on '{window_title_to_find}'.")
                 else:
-                    speak(f"No windows found for {app_name}")
+                    speak(f"No windows found for '{window_title_to_find}'.")
             except Exception as e:
-                speak(f"Failed to control {app_name}")
+                speak(f"Failed to control '{window_title_to_find}': {e}")
+                print(f"Error in app_control: {e}")
         
         # EXIT
         elif action == "exit":

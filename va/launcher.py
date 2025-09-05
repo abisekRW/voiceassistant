@@ -32,77 +32,132 @@ class VoiceAssistantGUI:
         
     def setup_gui(self):
         self.root.title("🤖 Voice Desktop Assistant")
-        self.root.geometry("600x700+100+100")
+        self.root.geometry("750x800+100+100")
         self.root.resizable(True, True)
+        self.root.configure(bg="#f0f0f0")
+        
+        # Style configuration
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Configure styles
+        style.configure('Title.TLabel', 
+                       font=('Arial', 18, 'bold'), 
+                       background='#f0f0f0',
+                       foreground='#2c3e50')
+        
+        style.configure('Status.TLabel',
+                       font=('Arial', 10),
+                       background='#f0f0f0',
+                       foreground='#34495e')
+        
+        style.configure('Custom.TFrame',
+                       background='#ffffff',
+                       relief='solid',
+                       borderwidth=1)
+        
+        style.configure('Custom.TLabelframe',
+                       background='#f0f0f0',
+                       font=('Arial', 11, 'bold'))
+        
+        style.configure('Custom.TLabelframe.Label',
+                       background='#f0f0f0',
+                       foreground='#2c3e50')
+        
+        style.configure('Action.TButton',
+                       font=('Arial', 10, 'bold'),
+                       padding=(10, 5))
         
         # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame = ttk.Frame(self.root, padding="15", style='Custom.TFrame')
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Configure grid weights
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(2, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(3, weight=1)
         
         # Title
-        title_label = tk.Label(main_frame, text="🎙️ Voice Desktop Assistant", 
-                              font=("Arial", 16, "bold"))
-        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 10))
+        title_label = ttk.Label(main_frame, 
+                               text="🎙️ Voice Desktop Assistant", 
+                               style='Title.TLabel')
+        title_label.grid(row=0, column=0, pady=(0, 15))
         
         # Status frame
-        status_frame = ttk.Frame(main_frame)
-        status_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        status_frame = ttk.Frame(main_frame, style='Custom.TFrame')
+        status_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
         status_frame.columnconfigure(1, weight=1)
         
         # Status indicator
-        self.status_label = tk.Label(status_frame, text="Status:", font=("Arial", 10))
-        self.status_label.grid(row=0, column=0, padx=(0, 5))
+        ttk.Label(status_frame, text="Status:", style='Status.TLabel').grid(
+            row=0, column=0, padx=(10, 5), pady=10, sticky=tk.W)
         
-        self.status_indicator = tk.Label(status_frame, text="🔴 Idle", 
-                                        font=("Arial", 10, "bold"))
-        self.status_indicator.grid(row=0, column=1, sticky=tk.W)
+        self.status_indicator = ttk.Label(status_frame, text="🔴 Idle", 
+                                         font=('Arial', 10, 'bold'),
+                                         foreground='#e74c3c')
+        self.status_indicator.grid(row=0, column=1, padx=(0, 10), pady=10, sticky=tk.W)
         
         # Listening indicator
-        self.listening_label = tk.Label(status_frame, text="", 
-                                       font=("Arial", 10), fg="blue")
-        self.listening_label.grid(row=1, column=0, columnspan=2, sticky=tk.W)
+        self.listening_label = ttk.Label(status_frame, text="", 
+                                        font=('Arial', 10), 
+                                        foreground='#3498db')
+        self.listening_label.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky=tk.W)
         
         # Current input display
-        input_frame = ttk.LabelFrame(main_frame, text="Current Voice Input", padding="5")
-        input_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        input_frame = ttk.LabelFrame(main_frame, text="Current Voice Input", 
+                                    padding="10", style='Custom.TLabelframe')
+        input_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
         input_frame.columnconfigure(0, weight=1)
         
-        self.current_input = tk.Label(input_frame, text="", font=("Arial", 11, "italic"),
-                                     fg="blue", wraplength=500, justify=tk.LEFT)
-        self.current_input.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        self.current_input = ttk.Label(input_frame, text="", 
+                                      font=('Arial', 12, 'italic'),
+                                      foreground='#3498db',
+                                      wraplength=600,
+                                      justify=tk.LEFT,
+                                      background='#ffffff')
+        self.current_input.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
         
         # Log display
-        log_frame = ttk.LabelFrame(main_frame, text="Assistant Log", padding="5")
-        log_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        log_frame = ttk.LabelFrame(main_frame, text="Assistant Log", 
+                                  padding="10", style='Custom.TLabelframe')
+        log_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 15))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         
-        self.log_display = scrolledtext.ScrolledText(log_frame, height=20, width=70,
-                                                    font=("Consolas", 9),
-                                                    wrap=tk.WORD)
+        self.log_display = scrolledtext.ScrolledText(log_frame, 
+                                                    height=20, 
+                                                    width=80,
+                                                    font=('Consolas', 10),
+                                                    wrap=tk.WORD,
+                                                    relief='solid',
+                                                    borderwidth=1,
+                                                    padx=5,
+                                                    pady=5)
         self.log_display.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Control buttons frame
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=4, column=0, columnspan=2, pady=(0, 5))
+        button_frame.grid(row=4, column=0, pady=(0, 10))
         
-        self.start_button = ttk.Button(button_frame, text="🎤 Start Assistant", 
-                                      command=self.start_assistant)
-        self.start_button.grid(row=0, column=0, padx=(0, 5))
+        self.start_button = ttk.Button(button_frame, 
+                                      text="🎤 Start Assistant", 
+                                      command=self.start_assistant,
+                                      style='Action.TButton')
+        self.start_button.grid(row=0, column=0, padx=(0, 10))
         
-        self.stop_button = ttk.Button(button_frame, text="⏹️ Stop Assistant", 
-                                     command=self.stop_assistant, state="disabled")
-        self.stop_button.grid(row=0, column=1, padx=5)
+        self.stop_button = ttk.Button(button_frame, 
+                                     text="⏹️ Stop Assistant", 
+                                     command=self.stop_assistant, 
+                                     state="disabled",
+                                     style='Action.TButton')
+        self.stop_button.grid(row=0, column=1, padx=10)
         
-        self.clear_button = ttk.Button(button_frame, text="🗑️ Clear Log", 
-                                      command=self.clear_log)
-        self.clear_button.grid(row=0, column=2, padx=(5, 0))
+        self.clear_button = ttk.Button(button_frame, 
+                                      text="🗑️ Clear Log", 
+                                      command=self.clear_log,
+                                      style='Action.TButton')
+        self.clear_button.grid(row=0, column=2, padx=(10, 0))
         
         # Initial log message
         self.add_log("GUI initialized. Click 'Start Assistant' to begin.", "INFO")
@@ -113,13 +168,13 @@ class VoiceAssistantGUI:
         
         # Color coding for different message types
         colors = {
-            "INFO": "black",
-            "SUCCESS": "green",
-            "ERROR": "red",
-            "WARNING": "orange",
-            "USER": "blue",
-            "ASSISTANT": "purple",
-            "SYSTEM": "gray"
+            "INFO": "#2c3e50",        # Dark blue-gray
+            "SUCCESS": "#27ae60",     # Green
+            "ERROR": "#e74c3c",       # Red
+            "WARNING": "#f39c12",     # Orange
+            "USER": "#3498db",        # Blue
+            "ASSISTANT": "#9b59b6",   # Purple
+            "SYSTEM": "#7f8c8d"       # Gray
         }
         
         # Insert message
@@ -132,7 +187,7 @@ class VoiceAssistantGUI:
         
         tag_name = f"{msg_type}_{int(time.time() * 1000)}"
         self.log_display.tag_add(tag_name, last_line_start, last_line_end)
-        self.log_display.tag_configure(tag_name, foreground=colors.get(msg_type, "black"))
+        self.log_display.tag_configure(tag_name, foreground=colors.get(msg_type, "#2c3e50"))
         
         # Auto-scroll to bottom
         self.log_display.see(tk.END)
@@ -140,19 +195,19 @@ class VoiceAssistantGUI:
     def update_status(self, status, color="black"):
         """Update the status indicator"""
         status_colors = {
-            "idle": ("🔴 Idle", "red"),
-            "running": ("🟢 Running", "green"),
-            "listening": ("🎤 Listening...", "blue"),
-            "processing": ("⚙️ Processing...", "orange"),
-            "executing": ("🔧 Executing...", "purple"),
-            "error": ("❌ Error", "red")
+            "idle": ("🔴 Idle", "#e74c3c"),
+            "running": ("🟢 Running", "#27ae60"),
+            "listening": ("🎤 Listening...", "#3498db"),
+            "processing": ("⚙️ Processing...", "#f39c12"),
+            "executing": ("🔧 Executing...", "#9b59b6"),
+            "error": ("❌ Error", "#e74c3c")
         }
         
         if status.lower() in status_colors:
             text, color = status_colors[status.lower()]
-            self.status_indicator.config(text=text, fg=color)
+            self.status_indicator.config(text=text, foreground=color)
         else:
-            self.status_indicator.config(text=status, fg=color)
+            self.status_indicator.config(text=status, foreground=color)
             
     def update_listening_status(self, message):
         """Update the listening status message"""
