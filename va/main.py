@@ -486,11 +486,6 @@ def rank_matches(items, raw_query, item_type="both"):
 
     ranked.sort(key=lambda x: x[0], reverse=True)
     
-    # Debugging: Print top matches and their scores
-    # print(f"DEBUG: Query: '{raw_query}', Core: '{q_norm_core}', Ext: '{ext_hint}'")
-    # for s, i in ranked[:5]:
-    #     print(f"DEBUG: Item: '{i}', Score: {s}")
-
     return [item for score, item in ranked]
 
 def smart_find_item(query, folder_path=None, item_type="both"):
@@ -533,6 +528,77 @@ def search_all_folders_for_item(query, item_type="both"):
 def clear_folder_cache():
     """Clear cached folder contents"""
     context["folder_contents"].clear()
+
+# ---------- NEW/IMPROVED RESTORE FUNCTION ----------
+def restore_file_from_recycle_bin(file_query):
+    """Fixed restore function with proper PowerShell handling"""
+    try:
+        ps_command = f"""
+        $ErrorActionPreference = 'Stop'
+        try {{
+            $shell = New-Object -ComObject Shell.Application
+            $recycleBin = $shell.NameSpace(10)
+            
+            if ($recycleBin -eq $null) {{
+                Write-Output "ERROR: Cannot access Recycle Bin"
+                exit 1
+            }}
+            
+            $items = $recycleBin.Items()
+            $fileToRestore = $null
+            
+            # First, try for an exact match
+            foreach ($item in $items) {{
+                if ($item.Name -eq "{file_query}") {{
+                    $fileToRestore = $item
+                    break
+                }}
+            }}
+            
+            # If no exact match, try for a partial match
+            if ($fileToRestore -eq $null) {{
+                foreach ($item in $items) {{
+                    if ($item.Name -like "*{file_query}*") {{
+                        $fileToRestore = $item
+                        break
+                    }}
+                }}
+            }}
+            
+            if ($fileToRestore -ne $null) {{
+                # The verb is "undelete" or "restore" depending on Windows version.
+                # "undelete" is generally more reliable for scripting.
+                $fileToRestore.InvokeVerb("undelete")
+                Write-Output "SUCCESS: Restored $($fileToRestore.Name)"
+            }} else {{
+                Write-Output "ERROR: File not found in Recycle Bin"
+            }}
+        }} catch {{
+            Write-Output "ERROR: $($_.Exception.Message)"
+        }}
+        """
+        
+        result = subprocess.run(
+            ['powershell', '-ExecutionPolicy', 'Bypass', '-Command', ps_command],
+            capture_output=True,
+            text=True,
+            timeout=20
+        )
+        
+        if result.returncode == 0 and "SUCCESS:" in result.stdout:
+            restored_name = result.stdout.split("SUCCESS: Restored ")[1].strip()
+            return True, restored_name
+        else:
+            error_msg = "Unknown error"
+            if "ERROR:" in result.stdout:
+                error_msg = result.stdout.split("ERROR: ")[1].strip().split('\n')[0]
+            elif result.stderr:
+                 error_msg = result.stderr.strip()
+            return False, error_msg
+            
+    except Exception as e:
+        return False, str(e)
+
 
 # ---------- OPTIMIZED NOISE REDUCTION ----------
 def record_with_noise_suppression(duration=5, samplerate=16000):
@@ -972,7 +1038,7 @@ def execute(action, params):
                         if type_filter:
                             # Apply filter to Recycle Bin items
                             for item in rb_items:
-                                item_ext = os.path.splitext(item['name'])[1][1:].lower()
+                                item_ext = os.path.splitext(item['name'])[1:].lower()
                                 if type_filter == "image":
                                     if item_ext in IMAGE_EXT: filtered_rb_items.append(item)
                                 elif type_filter == "pdf":
@@ -1094,16 +1160,16 @@ def execute(action, params):
                         file_path = unique_matches[choice_num - 1]
                     else:
                         speak("Invalid choice. Opening the first match.")
-                        file_path = unique_matches[0] # Default to first
+                        file_path = unique_matches # Default to first
                 except sr.UnknownValueError:
                     speak("Did not catch your choice. Opening the first match.")
-                    file_path = unique_matches[0] # Default to first
+                    file_path = unique_matches # Default to first
                 except Exception as e:
                     speak(f"Error processing choice: {e}. Opening the first match.")
-                    file_path = unique_matches[0] # Default to first
+                    file_path = unique_matches # Default to first
             else:
                 # Only one unique match
-                file_path = unique_matches[0]
+                file_path = unique_matches
 
             if file_path and os.path.isfile(file_path):
                 os.startfile(file_path)
@@ -1284,7 +1350,7 @@ def execute(action, params):
                     return
 
             else: # Only one unique match
-                target_path = unique_matches[0]
+                target_path = unique_matches
 
             if target_path and os.path.exists(target_path):
                 file_to_delete_name = os.path.basename(target_path)
@@ -1308,58 +1374,30 @@ def execute(action, params):
                 speak(f"File '{query}' not found for deletion.")
             return
         
+        #
+        # --- MODIFIED RESTORE FILE ACTION ---
+        #
         elif action == "restore_file":
             file_query = params.get("file", "").strip()
             if not file_query:
                 speak("Please tell me which file to restore from the recycle bin.")
                 return
 
-            try:
-                # Add debug logging for Recycle Bin contents
-                ps_command = f"""
-                $shell = New-Object -ComObject Shell.Application
-                $recycleBin = $shell.NameSpace(10) # 10 is the Recycle Bin folder constant
-
-                # DEBUG: List all item names in the recycle bin for inspection
-                Write-Output "DEBUG: Recycle Bin items found:"
-                $recycleBin.Items() | ForEach-Object {{ Write-Output $_.Name }}
-                Write-Output "DEBUG: --- End Recycle Bin items ---"
-
-                # Find the item by name (case-insensitive and potentially more flexible with *)
-                $fileToRestore = $recycleBin.Items() | Where-Object {{ $_.Name -ilike '*{file_query}*' }} | Select-Object -First 1
-
-                if ($fileToRestore) {{
-                    $fileToRestore.InvokeVerb("Restore")
-                    Write-Output "Restored: $($fileToRestore.Name)"
-                }} else {{
-                    Write-Output "Not found: {file_query}"
-                }}
-                """
-                
-                print(f"Executing PowerShell command to restore file: {file_query}")
-                result = subprocess.run(
-                    ['powershell', '-Command', ps_command],
-                    capture_output=True,
-                    text=True,
-                    timeout=15
-                )
-
-                if result.returncode == 0 and "Restored:" in result.stdout:
-                    restored_name = result.stdout.split("Restored: ")[1].strip()
-                    speak(f"Restored '{restored_name}' from the recycle bin.")
-                    clear_folder_cache()
-                else:
-                    speak(f"Could not find or restore '{file_query}' from the recycle bin. It might be permanently deleted or the name is too generic.")
-                    print("PowerShell output:", result.stdout)
-                    if result.stderr:
-                        print("PowerShell error:", result.stderr)
-
-            except Exception as e:
-                speak(f"Error restoring file from recycle bin: {e}")
-                print(f"Recycle bin restore error: {e}")
+            speak(f"Searching for '{file_query}' in the recycle bin...")
+            success, result_msg = restore_file_from_recycle_bin(file_query)
+            
+            if success:
+                speak(f"Successfully restored '{result_msg}'.")
+                # We don't know where it was restored to, so we can't update context easily
+                # But we can clear the cache so the restored file is found on the next scan
+                clear_folder_cache()
+            else:
+                speak(f"Failed to restore the file. Reason: {result_msg}")
             return
 
-        # NEW: UNDO LAST OPERATION
+        #
+        # --- MODIFIED UNDO LAST OPERATION ACTION ---
+        #
         elif action == "undo_last_operation":
             details = context.get("last_operation_details")
             if not details:
@@ -1395,60 +1433,22 @@ def execute(action, params):
                     print(f"Undo move error: {e}")
 
             elif op_type == "delete":
-                deleted_path = details.get("deleted_path")
                 file_name = details.get("file_name")
                 
-                try:
-                    # Add debug logging for Recycle Bin contents
-                    ps_command = f"""
-                    $shell = New-Object -ComObject Shell.Application
-                    $recycleBin = $shell.NameSpace(10) # 10 is the Recycle Bin folder constant
+                speak(f"Attempting to restore '{file_name}' from the recycle bin...")
+                success, result_msg = restore_file_from_recycle_bin(file_name)
 
-                    # DEBUG: List all item names in the recycle bin for inspection
-                    Write-Output "DEBUG: Recycle Bin items found:"
-                    $recycleBin.Items() | ForEach-Object {{ Write-Output $_.Name }}
-                    Write-Output "DEBUG: --- End Recycle Bin items ---"
-
-                    # Find the item by name (case-insensitive and exact match is better for undo)
-                    # We use -ilike '*{file_name}*' to be flexible, but maybe -eq is better if the file_name is known exactly.
-                    # For `undo delete`, we expect the exact name.
-                    $fileToRestore = $recycleBin.Items() | Where-Object {{ $_.Name -ilike '{file_name}' }} | Select-Object -First 1
-
-                    if ($fileToRestore) {{
-                        $fileToRestore.InvokeVerb("Restore")
-                        Write-Output "Restored: $($fileToRestore.Name)"
-                    }} else {{
-                        Write-Output "Not found: {file_name}"
-                    }}
-                    """
-                    
-                    print(f"Executing PowerShell command to undo delete: {file_name}")
-                    result = subprocess.run(
-                        ['powershell', '-Command', ps_command],
-                        capture_output=True,
-                        text=True,
-                        timeout=15
-                    )
-
-                    if result.returncode == 0 and "Restored:" in result.stdout:
-                        restored_name = result.stdout.split("Restored: ")[1].strip()
-                        speak(f"Undo successful. '{restored_name}' restored from the recycle bin.")
-                        context.update({
-                            "last_file": deleted_path,
-                            "last_folder": details.get("original_parent_folder"),
-                            "last_action": "undo_delete"
-                        })
-                        context["last_operation_details"] = None
-                        clear_folder_cache()
-                    else:
-                        speak(f"Could not undo delete operation for '{file_name}'. It might not be in the recycle bin or the restore command failed.")
-                        print("PowerShell output (undo delete):", result.stdout)
-                        if result.stderr:
-                            print("PowerShell error (undo delete):", result.stderr)
-
-                except Exception as e:
-                    speak(f"Failed to undo delete operation: {e}")
-                    print(f"Undo delete error: {e}")
+                if success:
+                    speak(f"Undo successful. '{result_msg}' has been restored.")
+                    context.update({
+                        "last_file": details.get("deleted_path"),
+                        "last_folder": details.get("original_parent_folder"),
+                        "last_action": "undo_delete"
+                    })
+                    context["last_operation_details"] = None
+                    clear_folder_cache()
+                else:
+                    speak(f"Could not undo the delete. Reason: {result_msg}")
 
             else:
                 speak("Cannot undo this type of operation.")
@@ -1500,7 +1500,7 @@ def execute(action, params):
             try:
                 windows = gw.getWindowsWithTitle(app_name)
                 if windows:
-                    window = windows[0]
+                    window = windows
                     getattr(window, command, lambda: None)()
                     speak(f"{command} executed on {app_name}")
                 else:
