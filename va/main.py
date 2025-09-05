@@ -1257,10 +1257,10 @@ def listen_and_execute_loop():
                 consecutive_errors = 0
 
 # ---------- MAIN ----------
-if __name__ == "__main__":
+def run_assistant():
     print("🤖 Voice Assistant Starting...")
     speak("Voice assistant is ready")
-    
+
     try:
         listen_and_execute_loop()
     except KeyboardInterrupt:
@@ -1269,3 +1269,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Fatal error: {e}")
         speak("Assistant encountered a fatal error and will restart")
+
+if __name__ == "__main__":
+    run_assistant()
