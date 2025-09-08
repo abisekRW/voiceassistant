@@ -772,7 +772,7 @@ def fallback_parser(command: str):
         params = {"folder": "Recycle Bin"}
         
         # Try to infer type filter (reuse existing logic for list_files)
-        for ext_word in EXT_type_query:
+        for ext_word in EXT_type_query: # type: ignore
             if ext_word in file_type_query:
                 params["type_filter"] = ext_word
                 break
