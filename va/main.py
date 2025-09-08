@@ -772,7 +772,7 @@ def fallback_parser(command: str):
         params = {"folder": "Recycle Bin"}
         
         # Try to infer type filter (reuse existing logic for list_files)
-        for ext_word in EXT_WORDS:
+        for ext_word in EXT_type_query:
             if ext_word in file_type_query:
                 params["type_filter"] = ext_word
                 break
@@ -834,697 +834,724 @@ def fallback_parser(command: str):
         return {"action": "screenshot", "params": {}}
 
     return {"action": "unknown", "params": {}}
-# ---------- ENHANCED EXECUTION ----------
-def execute(action, params):
-    """Enhanced execution with better error handling and persistence"""
-    global context
 
-    def map_folder(name: str):
-        if not name: return None, None
-        key = FOLDER_MAP.get(name.lower(), name.lower())
-        return FOLDER_PATHS.get(key), key
+# ---------- HELPER FOR FOLDER MAPPING (moved outside execute) ----------
+def _map_folder(name: str):
+    """Maps a folder name to its path and normalized key."""
+    if not name: return None, None
+    key = FOLDER_MAP.get(name.lower(), name.lower())
+    return FOLDER_PATHS.get(key), key
 
-    try:
-        # OPEN APP/FOLDER - DYNAMIC
-        if action == "open_app":
-            app = params.get("app", "").strip()
-            
-            if app.lower() == "recycle bin":
-                try:
-                    # Use a shell command to open the Recycle Bin
-                    subprocess.Popen(['explorer', 'shell:RecycleBinFolder'])
-                    speak("Opening Recycle Bin.")
-                    context.update({
-                        "last_app": "Recycle Bin",
-                        "last_action": "open_app", 
-                        "last_folder": None # Recycle Bin isn't a normal folder path for context
-                    })
-                    return
-                except Exception as e:
-                    speak(f"Failed to open Recycle Bin: {e}")
-                    print(f"Error opening Recycle Bin: {e}")
-                    # Continue to dynamic app launcher as a fallback (though it won't work well for recycle bin)
+# ---------- ACTION HANDLER FUNCTIONS ----------
 
-
-            # First, try system folders (existing logic)
-            folder_path, mapped = map_folder(app.lower())
-            if folder_path and os.path.isdir(folder_path):
-                os.startfile(folder_path)
-                speak(f"Opening {mapped}")
-                context.update({
-                    "last_app": mapped,
-                    "last_action": "open_app", 
-                    "last_folder": folder_path
-                })
-                clear_folder_cache()
-                return
-
-            # Use dynamic app launcher (existing logic)
-            if execute_open_app_dynamic(app):
-                context.update({"last_app": app, "last_action": "open_app"})
-            
+def _handle_open_app(params):
+    """Handles the 'open_app' action."""
+    app = params.get("app", "").strip()
+    
+    if app.lower() == "recycle bin":
+        try:
+            subprocess.Popen(['explorer', 'shell:RecycleBinFolder'])
+            speak("Opening Recycle Bin.")
+            context.update({
+                "last_app": "Recycle Bin",
+                "last_action": "open_app", 
+                "last_folder": None
+            })
             return
-        
-        elif action == "open_folder":
-            query = params.get("folder", "").strip()
-            
-            folder_path = None
-            current_folder = context.get("last_folder")
-            
-            # 1. Try system folders first
-            mapped_path, mapped_name = map_folder(query)
-            if mapped_path and os.path.isdir(mapped_path):
-                folder_path = mapped_path
-            
-            if not folder_path:
-                # 2. Try current folder
-                if current_folder:
-                    match, _ = smart_find_item(query, current_folder, "folders")
-                    if match:
-                        folder_path = os.path.join(current_folder, match)
-                
-                # 3. Search all known folders
-                if not folder_path:
-                    for sys_folder_name, sys_folder_path in FOLDER_PATHS.items():
-                        if sys_folder_path != current_folder: # Avoid re-searching current
-                            match, _ = smart_find_item(query, sys_folder_path, "folders")
-                            if match:
-                                folder_path = os.path.join(sys_folder_path, match)
-                                break # Found it, so stop searching
+        except Exception as e:
+            speak(f"Failed to open Recycle Bin: {e}")
+            print(f"Error opening Recycle Bin: {e}")
 
-            if folder_path and os.path.isdir(folder_path):
-                os.startfile(folder_path)
-                speak(f"Opening folder {os.path.basename(folder_path)}")
-                context.update({
-                    "last_folder": folder_path,
-                    "last_action": "open_folder"
-                })
-                clear_folder_cache()
-            else:
-                speak(f"Folder '{query}' not found.")
-            return
+    folder_path, mapped = _map_folder(app.lower())
+    if folder_path and os.path.isdir(folder_path):
+        os.startfile(folder_path)
+        speak(f"Opening {mapped}")
+        context.update({
+            "last_app": mapped,
+            "last_action": "open_app", 
+            "last_folder": folder_path
+        })
+        clear_folder_cache()
+        return
 
-        # ENHANCED OPEN SUBFOLDER
-        elif action == "open_subfolder":
-            subfolder = params.get("subfolder", "").strip()
-            parent_hint = params.get("parent", "").strip()
-            
-            # Determine parent folder
-            parent_folder = None
-            if parent_hint:
-                folder_path, mapped = map_folder(parent_hint)
-                if folder_path and os.path.isdir(folder_path):
-                    parent_folder = folder_path
-            
-            # Use last folder if no parent specified
-            if not parent_folder:
-                parent_folder = context.get("last_folder")
-            
-            if not parent_folder or not os.path.isdir(parent_folder):
-                speak("Please specify a parent folder or open one first.")
-                return
+    if execute_open_app_dynamic(app):
+        context.update({"last_app": app, "last_action": "open_app"})
 
-            # Smart find in parent folder
-            match, all_matches = smart_find_item(subfolder, parent_folder, "folders")
-            
+def _handle_open_folder(params):
+    """Handles the 'open_folder' action."""
+    query = params.get("folder", "").strip()
+    
+    folder_path = None
+    current_folder = context.get("last_folder")
+    
+    mapped_path, mapped_name = _map_folder(query)
+    if mapped_path and os.path.isdir(mapped_path):
+        folder_path = mapped_path
+    
+    if not folder_path:
+        if current_folder:
+            match, _ = smart_find_item(query, current_folder, "folders")
             if match:
-                target_path = os.path.join(parent_folder, match)
-                os.startfile(target_path)
-                speak(f"Opening {match}")
-                context.update({
-                    "last_folder": target_path,
-                    "last_action": "open_subfolder"
-                })
-                clear_folder_cache()
-            else:
-                # Show available folders
-                contents = get_folder_contents(parent_folder)
-                available = contents["folders"][:5]
-                if available:
-                    speak(f"Subfolder '{subfolder}' not found. Available: {', '.join(available)}")
-                else:
-                    speak("No subfolders found in this location.")
-            return
+                folder_path = os.path.join(current_folder, match)
+        
+        if not folder_path:
+            for sys_folder_name, sys_folder_path in FOLDER_PATHS.items():
+                if sys_folder_path != current_folder:
+                    match, _ = smart_find_item(query, sys_folder_path, "folders")
+                    if match:
+                        folder_path = os.path.join(sys_folder_path, match)
+                        break
 
-        # GO BACK - ENHANCED
-        elif action == "go_back":
-            current = context.get("last_folder")
-            if not current or not os.path.isdir(current):
-                speak("No current folder to go back from.")
-                return
+    if folder_path and os.path.isdir(folder_path):
+        os.startfile(folder_path)
+        speak(f"Opening folder {os.path.basename(folder_path)}")
+        context.update({
+            "last_folder": folder_path,
+            "last_action": "open_folder"
+        })
+        clear_folder_cache()
+    else:
+        speak(f"Folder '{query}' not found.")
+
+def _handle_open_subfolder(params):
+    """Handles the 'open_subfolder' action."""
+    subfolder = params.get("subfolder", "").strip()
+    parent_hint = params.get("parent", "").strip()
+    
+    parent_folder = None
+    if parent_hint:
+        folder_path, mapped = _map_folder(parent_hint)
+        if folder_path and os.path.isdir(folder_path):
+            parent_folder = folder_path
+    
+    if not parent_folder:
+        parent_folder = context.get("last_folder")
+    
+    if not parent_folder or not os.path.isdir(parent_folder):
+        speak("Please specify a parent folder or open one first.")
+        return
+
+    match, all_matches = smart_find_item(subfolder, parent_folder, "folders")
+    
+    if match:
+        target_path = os.path.join(parent_folder, match)
+        os.startfile(target_path)
+        speak(f"Opening {match}")
+        context.update({
+            "last_folder": target_path,
+            "last_action": "open_subfolder"
+        })
+        clear_folder_cache()
+    else:
+        contents = get_folder_contents(parent_folder)
+        available = contents["folders"][:5]
+        if available:
+            speak(f"Subfolder '{subfolder}' not found. Available: {', '.join(available)}")
+        else:
+            speak("No subfolders found in this location.")
+
+def _handle_go_back():
+    """Handles the 'go_back' action."""
+    current = context.get("last_folder")
+    if not current or not os.path.isdir(current):
+        speak("No current folder to go back from.")
+        return
+    
+    parent = os.path.dirname(current)
+    if parent and parent != current and os.path.isdir(parent):
+        os.startfile(parent)
+        speak(f"Going back to {os.path.basename(parent) or 'parent folder'}")
+        context.update({
+            "last_folder": parent,
+            "last_action": "go_back"
+        })
+        clear_folder_cache()
+    else:
+        speak("Already at root level.")
+
+def _handle_list_files(params):
+    """Handles the 'list_files' action."""
+    requested_folder_name = params.get("folder", "").strip().lower()
+    type_filter = params.get("type_filter", "").lower() 
+    
+    if requested_folder_name == "recycle bin":
+        try:
+            ps_command = f"""
+            $shell = New-Object -ComObject Shell.Application
+            $recycleBin = $shell.NameSpace(10)
+            $items = $recycleBin.Items()
             
-            parent = os.path.dirname(current)
-            if parent and parent != current and os.path.isdir(parent):
-                os.startfile(parent)
-                speak(f"Going back to {os.path.basename(parent) or 'parent folder'}")
-                context.update({
-                    "last_folder": parent,
-                    "last_action": "go_back"
-                })
-                clear_folder_cache()
-            else:
-                speak("Already at root level.")
-            return
-
-        # ENHANCED LIST FILES
-        elif action == "list_files":
-            # Check for a 'folder' parameter in the command's params
-            requested_folder_name = params.get("folder", "").strip().lower() # Convert to lower for comparison
-            type_filter = params.get("type_filter", "").lower() 
+            if ($items.Count -eq 0) {{
+                Write-Output "Recycle Bin is empty."
+            }} else {{
+                Write-Output "Recycle Bin Contents:"
+                $items | ForEach-Object {{ Write-Output "$($_.Name)|$($_.Path)" }}
+            }}
+            """
             
-            # --- NEW IMPROVEMENT: Handle Recycle Bin for listing ---
-            if requested_folder_name == "recycle bin":
-                try:
-                    # PowerShell command to list Recycle Bin items
-                    ps_command = f"""
-                    $shell = New-Object -ComObject Shell.Application
-                    $recycleBin = $shell.NameSpace(10) # 10 is the Recycle Bin folder constant
-                    $items = $recycleBin.Items()
-                    
-                    if ($items.Count -eq 0) {{
-                        Write-Output "Recycle Bin is empty."
-                    }} else {{
-                        Write-Output "Recycle Bin Contents:"
-                        $items | ForEach-Object {{ Write-Output "$($_.Name)|$($_.Path)" }} # Output Name|OriginalPath
-                    }}
-                    """
-                    
-                    print("Executing PowerShell command to list Recycle Bin contents...")
-                    result = subprocess.run(
-                        ['powershell', '-Command', ps_command],
-                        capture_output=True,
-                        text=True,
-                        timeout=30 # Increased timeout for potentially large recycle bins
-                    )
+            print("Executing PowerShell command to list Recycle Bin contents...")
+            result = subprocess.run(
+                ['powershell', '-Command', ps_command],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
 
-                    if result.returncode == 0:
-                        output_lines = result.stdout.splitlines()
-                        rb_items = []
-                        if "Recycle Bin Contents:" in output_lines:
-                            # Parse items from output, skipping debug lines and header
-                            for line in output_lines:
-                                if "|" in line and not line.startswith("DEBUG"):
-                                    name, original_path = line.split("|", 1)
-                                    rb_items.append({"name": name, "original_path": original_path})
+            if result.returncode == 0:
+                output_lines = result.stdout.splitlines()
+                rb_items = []
+                if "Recycle Bin Contents:" in output_lines:
+                    for line in output_lines:
+                        if "|" in line and not line.startswith("DEBUG"):
+                            name, original_path = line.split("|", 1)
+                            rb_items.append({"name": name, "original_path": original_path})
 
-                        if not rb_items:
-                            speak("The Recycle Bin is empty.")
-                            context["last_folder"] = None # No standard folder to set
-                            return
-
-                        filtered_rb_items = []
-                        if type_filter:
-                            # Apply filter to Recycle Bin items
-                            for item in rb_items:
-                                item_ext = os.path.splitext(item['name'])[1:].lower()
-                                if type_filter == "image":
-                                    if item_ext in IMAGE_EXT: filtered_rb_items.append(item)
-                                elif type_filter == "pdf":
-                                    if item_ext == "pdf": filtered_rb_items.append(item)
-                                elif type_filter == "document": # Generic document filter
-                                    if item_ext in ["doc", "docx", "txt", "rtf"]: filtered_rb_items.append(item)
-                                elif type_filter in EXT_WORDS: # Specific extension
-                                    if item_ext == type_filter: filtered_rb_items.append(item)
-                                # Add more specific type filters as needed
-                                else:
-                                    filtered_rb_items.append(item) # If filter not recognized, include all
-                        else:
-                            filtered_rb_items = rb_items
-
-                        if not filtered_rb_items:
-                            speak(f"No {type_filter} items found in the Recycle Bin.")
-                            context["last_folder"] = None
-                            return
-
-                        print("\n🗑️ Recycle Bin Contents (Filtered):")
-                        for item in filtered_rb_items[:10]: # Limit display
-                            print(f"  - {item['name']} (from {os.path.basename(item['original_path'])})")
-                        
-                        preview_names = [item['name'] for item in filtered_rb_items[:3]]
-                        speak(f"Found {len(filtered_rb_items)} items in the Recycle Bin. Including: {', '.join(preview_names)}")
-                        
-                        context["last_folder"] = None # Recycle Bin is not a standard path
-                        context["last_action"] = "list_files" # Still list_files action
-                        return
-
-                    else:
-                        speak("Failed to list Recycle Bin contents.")
-                        print("PowerShell output:", result.stdout)
-                        if result.stderr:
-                            print("PowerShell error:", result.stderr)
-                        context["last_folder"] = None
-                        return
-
-                except Exception as e:
-                    speak(f"Error listing Recycle Bin contents: {e}")
-                    print(f"Recycle Bin listing error: {e}")
+                if not rb_items:
+                    speak("The Recycle Bin is empty.")
                     context["last_folder"] = None
                     return
-            # --- END NEW IMPROVEMENT ---
 
-
-            folder_path = None
-            if requested_folder_name:
-                # Try to map the requested folder name to a known path
-                mapped_path, _ = map_folder(requested_folder_name.lower())
-                if mapped_path and os.path.isdir(mapped_path):
-                    folder_path = mapped_path
+                filtered_rb_items = []
+                if type_filter:
+                    for item in rb_items:
+                        item_ext = os.path.splitext(item['name'])[1:].lower().lstrip('.')
+                        if type_filter == "image":
+                            if item_ext in IMAGE_EXT: filtered_rb_items.append(item)
+                        elif type_filter == "pdf":
+                            if item_ext == "pdf": filtered_rb_items.append(item)
+                        elif type_filter == "document":
+                            if item_ext in ["doc", "docx", "txt", "rtf", "odt"]: filtered_rb_items.append(item)
+                        elif type_filter == "video":
+                            if item_ext in ["mp4", "mkv", "avi", "mov"]: filtered_rb_items.append(item)
+                        elif type_filter == "audio":
+                            if item_ext in ["mp3", "wav", "flac"]: filtered_rb_items.append(item)
+                        elif item_ext == type_filter:
+                            filtered_rb_items.append(item)
                 else:
-                    speak(f"Could not find a system folder named '{requested_folder_name}'.")
+                    filtered_rb_items = rb_items
+
+                if not filtered_rb_items:
+                    speak(f"No {type_filter} items found in the Recycle Bin.")
+                    context["last_folder"] = None
                     return
-            else:
-                # If no specific folder is requested, use the last opened folder
-                folder_path = context.get("last_folder")
 
-            if not folder_path or not os.path.isdir(folder_path):
-                speak("No folder is currently open or specified.")
-                return
-
-        # ENHANCED OPEN FILE
-        elif action == "open_file":
-            query = params.get("file", "").strip()
-            
-            file_path = None
-            current_folder = context.get("last_folder")
-            
-            # 1. Try current folder first
-            possible_matches = []
-            if current_folder:
-                _, matches_in_current = smart_find_item(query, current_folder, "files")
-                possible_matches.extend([os.path.join(current_folder, m) for m in matches_in_current])
-            
-            # 2. Search all folders if not enough matches or no current folder
-            if not possible_matches or len(possible_matches) < 2: # Get more options if only one or none
-                for folder_name, folder_path in FOLDER_PATHS.items():
-                    if folder_path != current_folder: # Avoid re-searching current folder
-                        _, matches_in_other = smart_find_item(query, folder_path, "files")
-                        possible_matches.extend([os.path.join(folder_path, m) for m in matches_in_other])
-            
-            # Remove duplicates while preserving order for better ranking
-            seen = set()
-            unique_matches = []
-            for item in possible_matches:
-                if item not in seen:
-                    unique_matches.append(item)
-                    seen.add(item)
-            
-            # If no matches, inform the user
-            if not unique_matches:
-                speak(f"File '{query}' not found.")
-                return
-            
-            # If multiple matches, ask user to choose
-            if len(unique_matches) > 1:
-                speak("I found multiple files. Please choose one by saying its number:")
-                for i, match_path in enumerate(unique_matches[:5]): # Limit options to 5
-                    speak(f"Option {i+1}: {os.path.basename(match_path)} in {os.path.basename(os.path.dirname(match_path))}")
+                print("\n🗑️ Recycle Bin Contents (Filtered):")
+                for item in filtered_rb_items[:10]:
+                    print(f"  - {item['name']} (from {os.path.basename(item['original_path'])})")
                 
-                try:
-                    r = sr.Recognizer()
-                    with sr.Microphone() as source:
-                        print("🎤 Listening for choice...")
-                        r.adjust_for_ambient_noise(source, duration=0.3)
-                        audio = r.listen(source, phrase_time_limit=3)
-                    choice_str = r.recognize_google(audio).lower()
-                    
-                    choice_num = -1
-                    if "one" in choice_str or "1" in choice_str: choice_num = 1
-                    elif "two" in choice_str or "2" in choice_str: choice_num = 2
-                    elif "three" in choice_str or "3" in choice_str: choice_num = 3
-                    elif "four" in choice_str or "4" in choice_str: choice_num = 4
-                    elif "five" in choice_str or "5" in choice_str: choice_num = 5
+                preview_names = [item['name'] for item in filtered_rb_items[:3]]
+                speak(f"Found {len(filtered_rb_items)} items in the Recycle Bin. Including: {', '.join(preview_names)}")
+                
+                context["last_folder"] = None
+                context["last_action"] = "list_files"
+                return
 
-                    if 1 <= choice_num <= len(unique_matches[:5]):
-                        file_path = unique_matches[choice_num - 1]
-                    else:
-                        speak("Invalid choice. Opening the first match.")
-                        file_path = unique_matches # Default to first
-                except sr.UnknownValueError:
-                    speak("Did not catch your choice. Opening the first match.")
-                    file_path = unique_matches # Default to first
-                except Exception as e:
-                    speak(f"Error processing choice: {e}. Opening the first match.")
-                    file_path = unique_matches # Default to first
             else:
-                # Only one unique match
+                speak("Failed to list Recycle Bin contents.")
+                print("PowerShell output:", result.stdout)
+                if result.stderr:
+                    print("PowerShell error:", result.stderr)
+                context["last_folder"] = None
+                return
+
+        except Exception as e:
+            speak(f"Error listing Recycle Bin contents: {e}")
+            print(f"Recycle Bin listing error: {e}")
+            context["last_folder"] = None
+            return
+
+    folder_path = None
+    if requested_folder_name:
+        mapped_path, _ = _map_folder(requested_folder_name.lower())
+        if mapped_path and os.path.isdir(mapped_path):
+            folder_path = mapped_path
+        else:
+            speak(f"Could not find a system folder named '{requested_folder_name}'.")
+            return
+    else:
+        folder_path = context.get("last_folder")
+
+    if not folder_path or not os.path.isdir(folder_path):
+        speak("No folder is currently open or specified.")
+        return
+
+    contents = get_folder_contents(folder_path)
+    
+    items_to_list = []
+    if type_filter:
+        for item in contents["files"] + contents["folders"]:
+            item_ext = os.path.splitext(item).lower().lstrip('.')
+            if type_filter == "image":
+                if item_ext in IMAGE_EXT: items_to_list.append(item)
+            elif type_filter == "pdf":
+                if item_ext == "pdf": items_to_list.append(item)
+            elif type_filter == "document":
+                if item_ext in ["doc", "docx", "txt", "rtf", "odt"]: items_to_list.append(item)
+            elif type_filter == "video":
+                if item_ext in ["mp4", "mkv", "avi", "mov"]: items_to_list.append(item)
+            elif type_filter == "audio":
+                if item_ext in ["mp3", "wav", "flac"]: items_to_list.append(item)
+            elif item_ext == type_filter:
+                items_to_list.append(item)
+    else:
+        items_to_list = contents["files"] + contents["folders"]
+
+    if items_to_list:
+        speak(f"In {os.path.basename(folder_path)}, I found: {', '.join(items_to_list[:5])}. There are {len(items_to_list)} items in total.")
+    else:
+        speak(f"No items found in {os.path.basename(folder_path)} (or no matching type).")
+    context.update({"last_action": "list_files", "last_folder": folder_path})
+
+
+def _handle_open_file(params):
+    """Handles the 'open_file' action."""
+    query = params.get("file", "").strip()
+    
+    file_path = None
+    current_folder = context.get("last_folder")
+    
+    possible_matches = []
+    if current_folder:
+        _, matches_in_current = smart_find_item(query, current_folder, "files")
+        possible_matches.extend([os.path.join(current_folder, m) for m in matches_in_current])
+    
+    if not possible_matches or len(possible_matches) < 2:
+        for folder_name, folder_path_item in FOLDER_PATHS.items():
+            if folder_path_item != current_folder:
+                _, matches_in_other = smart_find_item(query, folder_path_item, "files")
+                possible_matches.extend([os.path.join(folder_path_item, m) for m in matches_in_other])
+    
+    seen = set()
+    unique_matches = []
+    for item in possible_matches:
+        if item not in seen:
+            unique_matches.append(item)
+            seen.add(item)
+    
+    if not unique_matches:
+        speak(f"File '{query}' not found.")
+        return
+    
+    if len(unique_matches) > 1:
+        speak("I found multiple files. Please choose one by saying its number:")
+        for i, match_path in enumerate(unique_matches[:5]):
+            speak(f"Option {i+1}: {os.path.basename(match_path)} in {os.path.basename(os.path.dirname(match_path))}")
+        
+        try:
+            r = sr.Recognizer()
+            with sr.Microphone() as source:
+                print("🎤 Listening for choice...")
+                r.adjust_for_ambient_noise(source, duration=0.3)
+                audio = r.listen(source, phrase_time_limit=3)
+            choice_str = r.recognize_google(audio).lower()
+            
+            choice_num = -1
+            if "one" in choice_str or "1" in choice_str: choice_num = 1
+            elif "two" in choice_str or "2" in choice_str: choice_num = 2
+            elif "three" in choice_str or "3" in choice_str: choice_num = 3
+            elif "four" in choice_str or "4" in choice_str: choice_num = 4
+            elif "five" in choice_str or "5" in choice_str: choice_num = 5
+
+            if 1 <= choice_num <= len(unique_matches[:5]):
+                file_path = unique_matches[choice_num - 1]
+            else:
+                speak("Invalid choice. Opening the first match.")
                 file_path = unique_matches
+        except sr.UnknownValueError:
+            speak("Did not catch your choice. Opening the first match.")
+            file_path = unique_matches
+        except Exception as e:
+            speak(f"Error processing choice: {e}. Opening the first match.")
+            file_path = unique_matches
+    else:
+        file_path = unique_matches
 
-            if file_path and os.path.isfile(file_path):
-                os.startfile(file_path)
-                speak(f"Opening {os.path.basename(file_path)}")
-                context.update({
-                    "last_file": file_path,
-                    "last_folder": os.path.dirname(file_path),
-                    "last_action": "open_file"
-                })
-            else:
-                speak(f"Could not open '{os.path.basename(file_path) if file_path else query}'.")
-            return
+    if file_path and os.path.isfile(file_path):
+        os.startfile(file_path)
+        speak(f"Opening {os.path.basename(file_path)}")
+        context.update({
+            "last_file": file_path,
+            "last_folder": os.path.dirname(file_path),
+            "last_action": "open_file"
+        })
+    else:
+        speak(f"Could not open '{os.path.basename(file_path) if file_path else query}'.")
 
-        # MOVE FILE - ENHANCED
-        elif action == "move_file":
-            src_query = params.get("source", "").strip()
-            dst_query = params.get("destination", "").strip()
-            
-            # Use last file if no source specified
-            if not src_query:
-                src_query = context.get("last_file", "")
-            
-            if not src_query or not dst_query:
-                speak("Please specify both source and destination for moving.")
-                return
-            
-            # Find source file
-            src_path = None
-            if os.path.isabs(src_query) and os.path.exists(src_query):
-                src_path = src_query
-            else:
-                current_folder = context.get("last_folder")
-                if current_folder:
-                    match, _ = smart_find_item(src_query, current_folder, "files")
-                    if match:
-                        src_path = os.path.join(current_folder, match)
-                
-                if not src_path:
-                    src_path, _ = search_all_folders_for_item(src_query, "files")
-            
-            if not src_path:
-                speak(f"Source file '{src_query}' not found.")
-                return
-            
-            # Prepare destination path
-            original_dst_path = None # Will store the actual path if moved
-            
-            if dst_query.lower() in ["recycle bin", "trash", "bin"]:
-                speak("Moving files to recycle bin is now handled by delete_file action.")
-                try:
-                    send2trash(src_path)
-                    speak(f"Moved {os.path.basename(src_path)} to recycle bin.")
-                    clear_folder_cache()
-                except Exception as e:
-                    speak(f"Failed to move {os.path.basename(src_path)} to recycle bin: {e}")
-                return
-            
-            dst_folder_path = None
-            # 1. Check if destination is a system folder
-            mapped_path, _ = map_folder(dst_query.lower())
-            if mapped_path and os.path.isdir(mapped_path):
-                dst_folder_path = mapped_path
-            else:
-                # 2. Check if destination is an existing custom folder in last_folder
-                current_folder = context.get("last_folder")
-                if current_folder:
-                    match, _ = smart_find_item(dst_query, current_folder, "folders")
-                    if match:
-                        dst_folder_path = os.path.join(current_folder, match)
-                # 3. Check if destination is an existing custom folder in all known paths
-                if not dst_folder_path:
-                    found_folder_path, _ = search_all_folders_for_item(dst_query, "folders")
-                    if found_folder_path and os.path.isdir(found_folder_path):
-                        dst_folder_path = found_folder_path
-                
-                # 4. If still not found, assume it's a new folder relative to desktop or create it
-                if not dst_folder_path:
-                    speak(f"Could not find destination folder '{dst_query}'. Creating a new one on desktop.")
-                    dst_folder_path = os.path.join(FOLDER_PATHS["desktop"], dst_query)
-                    os.makedirs(dst_folder_path, exist_ok=True)
-
-
-            if not dst_folder_path:
-                speak(f"Could not determine destination folder for '{dst_query}'.")
-                return
-
-            original_dst_path = os.path.join(dst_folder_path, os.path.basename(src_path))
-            
-            try:
-                # Store details for undo BEFORE the operation
-                context["last_operation_details"] = {
-                    "action": "move",
-                    "source_path": src_path,
-                    "destination_path": original_dst_path,
-                    "original_parent_folder": os.path.dirname(src_path),
-                    "new_parent_folder": dst_folder_path,
-                    "file_name": os.path.basename(src_path)
-                }
-
-                os.replace(src_path, original_dst_path) # Use os.replace for atomic move
-                speak(f"Moved '{os.path.basename(src_path)}' to '{os.path.basename(dst_folder_path)}'.")
-                context.update({
-                    "last_file": original_dst_path,
-                    "last_folder": dst_folder_path,
-                    "last_action": "move_file"
-                })
-                clear_folder_cache()
-            except Exception as e:
-                speak(f"Failed to move file: {e}")
-                context["last_operation_details"] = None # Clear undo if operation failed
-            return
-
-        # DELETE FILE
-        elif action == "delete_file":
-            query = params.get("file", "").strip()
-            
-            if not query:
-                query = context.get("last_file", "")
-            
-            target_path = None
-            
-            # Find target file, similar logic to open_file
-            possible_matches = []
-            current_folder = context.get("last_folder")
-            if current_folder:
-                _, matches_in_current = smart_find_item(query, current_folder, "files")
-                possible_matches.extend([os.path.join(current_folder, m) for m in matches_in_current])
-            
-            if not possible_matches or len(possible_matches) < 2:
-                for folder_name, folder_path in FOLDER_PATHS.items():
-                    if folder_path != current_folder:
-                        _, matches_in_other = smart_find_item(query, folder_path, "files")
-                        possible_matches.extend([os.path.join(folder_path, m) for m in matches_in_other])
-            
-            seen = set()
-            unique_matches = []
-            for item in possible_matches:
-                if item not in seen:
-                    unique_matches.append(item)
-                    seen.add(item)
-
-            if not unique_matches:
-                speak(f"File '{query}' not found.")
-                return
-
-            if len(unique_matches) > 1:
-                speak("I found multiple files. Which one would you like to delete? Please say its number:")
-                for i, match_path in enumerate(unique_matches[:5]):
-                    speak(f"Option {i+1}: {os.path.basename(match_path)} in {os.path.basename(os.path.dirname(match_path))}")
-                
-                try:
-                    r = sr.Recognizer()
-                    with sr.Microphone() as source:
-                        print("🎤 Listening for choice...")
-                        r.adjust_for_ambient_noise(source, duration=0.3)
-                        audio = r.listen(source, phrase_time_limit=3)
-                    choice_str = r.recognize_google(audio).lower()
-                    
-                    choice_num = -1
-                    if "one" in choice_str or "1" in choice_str: choice_num = 1
-                    elif "two" in choice_str or "2" in choice_str: choice_num = 2
-                    elif "three" in choice_str or "3" in choice_str: choice_num = 3
-                    elif "four" in choice_str or "4" in choice_str: choice_num = 4
-                    elif "five" in choice_str or "5" in choice_str: choice_num = 5
-
-                    if 1 <= choice_num <= len(unique_matches[:5]):
-                        target_path = unique_matches[choice_num - 1]
-                    else:
-                        speak("Invalid choice. Aborting deletion.")
-                        return # Abort if invalid choice
-                except sr.UnknownValueError:
-                    speak("Did not catch your choice. Aborting deletion.")
-                    return # Abort if no choice
-                except Exception as e:
-                    speak(f"Error processing choice: {e}. Aborting deletion.")
-                    return
-
-            else: # Only one unique match
-                target_path = unique_matches
-
-            if target_path and os.path.exists(target_path):
-                file_to_delete_name = os.path.basename(target_path)
-                try:
-                    # Store details for undo BEFORE the operation
-                    context["last_operation_details"] = {
-                        "action": "delete",
-                        "deleted_path": target_path,
-                        "original_parent_folder": os.path.dirname(target_path),
-                        "file_name": file_to_delete_name
-                    }
-                    send2trash(target_path)
-                    speak(f"Deleted {file_to_delete_name} and moved it to the recycle bin.")
-                    if context.get("last_file") == target_path:
-                        context["last_file"] = None
-                    clear_folder_cache()
-                except Exception as e:
-                    speak(f"Failed to delete file: {e}")
-                    context["last_operation_details"] = None
-            else:
-                speak(f"File '{query}' not found for deletion.")
-            return
+def _handle_move_file(params):
+    """Handles the 'move_file' action."""
+    src_query = params.get("source", "").strip()
+    dst_query = params.get("destination", "").strip()
+    
+    if not src_query:
+        src_query = context.get("last_file", "")
+    
+    if not src_query or not dst_query:
+        speak("Please specify both source and destination for moving.")
+        return
+    
+    src_path = None
+    if os.path.isabs(src_query) and os.path.exists(src_query):
+        src_path = src_query
+    else:
+        current_folder = context.get("last_folder")
+        if current_folder:
+            match, _ = smart_find_item(src_query, current_folder, "files")
+            if match:
+                src_path = os.path.join(current_folder, match)
         
-        # --- MODIFIED RESTORE FILE ACTION ---
-        elif action == "restore_file":
-            file_query = params.get("file", "").strip()
-            if not file_query:
-                speak("Please tell me which file to restore from the recycle bin.")
-                return
-
-            speak(f"Searching for '{file_query}' in the recycle bin...")
-            success, result_msg = restore_file_from_recycle_bin(file_query)
-            
-            if success:
-                speak(f"Successfully restored '{result_msg}'.")
-                clear_folder_cache()
-            else:
-                speak(f"Failed to restore the file. Reason: {result_msg}")
-            return
-
-        # --- MODIFIED UNDO LAST OPERATION ACTION ---
-        elif action == "undo_last_operation":
-            details = context.get("last_operation_details")
-            if not details:
-                speak("No recent operation to undo.")
-                return
-            
-            op_type = details.get("action")
-            
-            if op_type == "move":
-                source_path = details.get("source_path")
-                destination_path = details.get("destination_path")
-                original_parent_folder = details.get("original_parent_folder")
-                file_name = details.get("file_name")
-
-                if not os.path.exists(destination_path):
-                    speak(f"Cannot undo move: '{file_name}' not found in its new location. It might have been moved again.")
-                    context["last_operation_details"] = None
-                    return
-                
-                try:
-                    # Move it back to its original parent
-                    os.replace(destination_path, source_path)
-                    speak(f"Undo successful. '{file_name}' moved back to '{os.path.basename(original_parent_folder)}'.")
-                    context.update({
-                        "last_file": source_path,
-                        "last_folder": original_parent_folder,
-                        "last_action": "undo_move"
-                    })
-                    context["last_operation_details"] = None # Clear undo after use
-                    clear_folder_cache()
-                except Exception as e:
-                    speak(f"Failed to undo move operation: {e}")
-                    print(f"Undo move error: {e}")
-
-            elif op_type == "delete":
-                file_name = details.get("file_name")
-                
-                speak(f"Attempting to restore '{file_name}' from the recycle bin...")
-                success, result_msg = restore_file_from_recycle_bin(file_name)
-
-                if success:
-                    speak(f"Undo successful. '{result_msg}' has been restored.")
-                    context.update({
-                        "last_file": details.get("deleted_path"),
-                        "last_folder": details.get("original_parent_folder"),
-                        "last_action": "undo_delete"
-                    })
-                    context["last_operation_details"] = None
-                    clear_folder_cache()
-                else:
-                    speak(f"Could not undo the delete. Reason: {result_msg}")
-
-            else:
-                speak("Cannot undo this type of operation.")
-            return
-
-        # SYSTEM OPERATIONS
-        elif action == "shutdown":
-            speak("Shutting down in 3 seconds.")
-            os.system("shutdown /s /t 3")
-        elif action == "restart":
-            speak("Restarting in 3 seconds.")
-            os.system("shutdown /r /t 3")
-        elif action == "screenshot":
-            try:
-                path = params.get("path", f"screenshot_{int(time.time())}.png")
-                pyautogui.screenshot(path)
-                speak(f"Screenshot saved")
-            except Exception as e:
-                speak(f"Screenshot failed: {e}")
+        if not src_path:
+            src_path, _ = search_all_folders_for_item(src_query, "files")
+    
+    if not src_path:
+        speak(f"Source file '{src_query}' not found.")
+        return
+    
+    original_dst_path = None
+    
+    if dst_query.lower() in ["recycle bin", "trash", "bin"]:
+        speak("Moving files to recycle bin is now handled by delete_file action.")
+        try:
+            send2trash(src_path)
+            speak(f"Moved {os.path.basename(src_path)} to recycle bin.")
+            clear_folder_cache()
+        except Exception as e:
+            speak(f"Failed to move {os.path.basename(src_path)} to recycle bin: {e}")
+        return
+    
+    dst_folder_path = None
+    mapped_path, _ = _map_folder(dst_query.lower())
+    if mapped_path and os.path.isdir(mapped_path):
+        dst_folder_path = mapped_path
+    else:
+        current_folder = context.get("last_folder")
+        if current_folder:
+            match, _ = smart_find_item(dst_query, current_folder, "folders")
+            if match:
+                dst_folder_path = os.path.join(current_folder, match)
         
-        # WEB OPERATIONS
-        elif action == "youtube_search":
-            query = params.get("query", "")
-            webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
-            speak(f"Searching YouTube for {query}")
-        elif action == "youtube_control":
-            cmd = params.get("command", "").lower()
-            key_map = {
-                "pause": "k", "play": "k", "stop": "k",
-                "next": "shift+n", "previous": "shift+p",
-                "volume_up": "volumeup", "volume_down": "volumedown"
+        if not dst_folder_path:
+            found_folder_path, _ = search_all_folders_for_item(dst_query, "folders")
+            if found_folder_path and os.path.isdir(found_folder_path):
+                dst_folder_path = found_folder_path
+        
+        if not dst_folder_path:
+            speak(f"Could not find destination folder '{dst_query}'. Creating a new one on desktop.")
+            dst_folder_path = os.path.join(FOLDER_PATHS["desktop"], dst_query)
+            os.makedirs(dst_folder_path, exist_ok=True)
+
+    if not dst_folder_path:
+        speak(f"Could not determine destination folder for '{dst_query}'.")
+        return
+
+    original_dst_path = os.path.join(dst_folder_path, os.path.basename(src_path))
+    
+    try:
+        context["last_operation_details"] = {
+            "action": "move",
+            "source_path": src_path,
+            "destination_path": original_dst_path,
+            "original_parent_folder": os.path.dirname(src_path),
+            "new_parent_folder": dst_folder_path,
+            "file_name": os.path.basename(src_path)
+        }
+
+        os.replace(src_path, original_dst_path)
+        speak(f"Moved '{os.path.basename(src_path)}' to '{os.path.basename(dst_folder_path)}'.")
+        context.update({
+            "last_file": original_dst_path,
+            "last_folder": dst_folder_path,
+            "last_action": "move_file"
+        })
+        clear_folder_cache()
+    except Exception as e:
+        speak(f"Failed to move file: {e}")
+        context["last_operation_details"] = None
+
+def _handle_delete_file(params):
+    """Handles the 'delete_file' action."""
+    query = params.get("file", "").strip()
+    
+    if not query:
+        query = context.get("last_file", "")
+    
+    target_path = None
+    
+    possible_matches = []
+    current_folder = context.get("last_folder")
+    if current_folder:
+        _, matches_in_current = smart_find_item(query, current_folder, "files")
+        possible_matches.extend([os.path.join(current_folder, m) for m in matches_in_current])
+    
+    if not possible_matches or len(possible_matches) < 2:
+        for folder_name, folder_path in FOLDER_PATHS.items():
+            if folder_path != current_folder:
+                _, matches_in_other = smart_find_item(query, folder_path, "files")
+                possible_matches.extend([os.path.join(folder_path, m) for m in matches_in_other])
+    
+    seen = set()
+    unique_matches = []
+    for item in possible_matches:
+        if item not in seen:
+            unique_matches.append(item)
+            seen.add(item)
+
+    if not unique_matches:
+        speak(f"File '{query}' not found.")
+        return
+
+    if len(unique_matches) > 1:
+        speak("I found multiple files. Which one would you like to delete? Please say its number:")
+        for i, match_path in enumerate(unique_matches[:5]):
+            speak(f"Option {i+1}: {os.path.basename(match_path)} in {os.path.basename(os.path.dirname(match_path))}")
+        
+        try:
+            r = sr.Recognizer()
+            with sr.Microphone() as source:
+                print("🎤 Listening for choice...")
+                r.adjust_for_ambient_noise(source, duration=0.3)
+                audio = r.listen(source, phrase_time_limit=3)
+            choice_str = r.recognize_google(audio).lower()
+            
+            choice_num = -1
+            if "one" in choice_str or "1" in choice_str: choice_num = 1
+            elif "two" in choice_str or "2" in choice_str: choice_num = 2
+            elif "three" in choice_str or "3" in choice_str: choice_num = 3
+            elif "four" in choice_str or "4" in choice_str: choice_num = 4
+            elif "five" in choice_str or "5" in choice_str: choice_num = 5
+
+            if 1 <= choice_num <= len(unique_matches[:5]):
+                target_path = unique_matches[choice_num - 1]
+            else:
+                speak("Invalid choice. Aborting deletion.")
+                return
+        except sr.UnknownValueError:
+            speak("Did not catch your choice. Aborting deletion.")
+            return
+        except Exception as e:
+            speak(f"Error processing choice: {e}. Aborting deletion.")
+            return
+
+    else:
+        target_path = unique_matches
+
+    if target_path and os.path.exists(target_path):
+        file_to_delete_name = os.path.basename(target_path)
+        try:
+            context["last_operation_details"] = {
+                "action": "delete",
+                "deleted_path": target_path,
+                "original_parent_folder": os.path.dirname(target_path),
+                "file_name": file_to_delete_name
             }
-            if cmd in key_map:
-                if "+" in key_map[cmd]:
-                    keys = key_map[cmd].split("+")
-                    pyautogui.hotkey(*keys)
-                else:
-                    pyautogui.press(key_map[cmd])
-                speak(f"YouTube {cmd}")
+            send2trash(target_path)
+            speak(f"Deleted {file_to_delete_name} and moved it to the recycle bin.")
+            if context.get("last_file") == target_path:
+                context["last_file"] = None
+            clear_folder_cache()
+        except Exception as e:
+            speak(f"Failed to delete file: {e}")
+            context["last_operation_details"] = None
+    else:
+        speak(f"File '{query}' not found for deletion.")
+
+def _handle_restore_file(params):
+    """Handles the 'restore_file' action."""
+    file_query = params.get("file", "").strip()
+    if not file_query:
+        speak("Please tell me which file to restore from the recycle bin.")
+        return
+
+    speak(f"Searching for '{file_query}' in the recycle bin...")
+    success, result_msg = restore_file_from_recycle_bin(file_query)
+    
+    if success:
+        speak(f"Successfully restored '{result_msg}'.")
+        clear_folder_cache()
+    else:
+        speak(f"Failed to restore the file. Reason: {result_msg}")
+
+def _handle_undo_last_operation():
+    """Handles the 'undo_last_operation' action."""
+    details = context.get("last_operation_details")
+    if not details:
+        speak("No recent operation to undo.")
+        return
+    
+    op_type = details.get("action")
+    
+    if op_type == "move":
+        source_path = details.get("source_path")
+        destination_path = details.get("destination_path")
+        original_parent_folder = details.get("original_parent_folder")
+        file_name = details.get("file_name")
+
+        if not os.path.exists(destination_path):
+            speak(f"Cannot undo move: '{file_name}' not found in its new location. It might have been moved again.")
+            context["last_operation_details"] = None
+            return
+        
+        try:
+            os.replace(destination_path, source_path)
+            speak(f"Undo successful. '{file_name}' moved back to '{os.path.basename(original_parent_folder)}'.")
+            context.update({
+                "last_file": source_path,
+                "last_folder": original_parent_folder,
+                "last_action": "undo_move"
+            })
+            context["last_operation_details"] = None
+            clear_folder_cache()
+        except Exception as e:
+            speak(f"Failed to undo move operation: {e}")
+            print(f"Undo move error: {e}")
+
+    elif op_type == "delete":
+        file_name = details.get("file_name")
+        
+        speak(f"Attempting to restore '{file_name}' from the recycle bin...")
+        success, result_msg = restore_file_from_recycle_bin(file_name)
+
+        if success:
+            speak(f"Undo successful. '{result_msg}' has been restored.")
+            context.update({
+                "last_file": details.get("deleted_path"),
+                "last_folder": details.get("original_parent_folder"),
+                "last_action": "undo_delete"
+            })
+            context["last_operation_details"] = None
+            clear_folder_cache()
+        else:
+            speak(f"Could not undo the delete. Reason: {result_msg}")
+
+    else:
+        speak("Cannot undo this type of operation.")
+
+def _handle_shutdown():
+    """Handles the 'shutdown' action."""
+    speak("Shutting down in 3 seconds.")
+    os.system("shutdown /s /t 3")
+
+def _handle_restart():
+    """Handles the 'restart' action."""
+    speak("Restarting in 3 seconds.")
+    os.system("shutdown /r /t 3")
+
+def _handle_screenshot(params):
+    """Handles the 'screenshot' action."""
+    try:
+        path = params.get("path", f"screenshot_{int(time.time())}.png")
+        pyautogui.screenshot(path)
+        speak(f"Screenshot saved")
+    except Exception as e:
+        speak(f"Screenshot failed: {e}")
+
+def _handle_youtube_search(params):
+    """Handles the 'youtube_search' action."""
+    query = params.get("query", "")
+    webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
+    speak(f"Searching YouTube for {query}")
+
+def _handle_youtube_control(params):
+    """Handles the 'youtube_control' action."""
+    cmd = params.get("command", "").lower()
+    key_map = {
+        "pause": "k", "play": "k", "stop": "k",
+        "next": "shift+n", "previous": "shift+p",
+        "volume_up": "volumeup", "volume_down": "volumedown"
+    }
+    if cmd in key_map:
+        if "+" in key_map[cmd]:
+            keys = key_map[cmd].split("+")
+            pyautogui.hotkey(*keys)
+        else:
+            pyautogui.press(key_map[cmd])
+        speak(f"YouTube {cmd}")
+
+def _handle_web_search(params):
+    """Handles the 'web_search' action."""
+    query = params.get("query", "")
+    webbrowser.open(f"https://www.google.com/search?q={query}")
+    speak(f"Searching for {query}")
+
+def _handle_app_control(params):
+    """Handles the 'app_control' action."""
+    app_name_query = params.get("app", context.get("last_app", "")).strip().lower()
+    command = params.get("command", "").strip().lower()
+
+    if not app_name_query:
+        speak("Please specify which application to control.")
+        return
+    if not command in ["close", "minimize", "maximize", "restore"]:
+        speak(f"Command '{command}' is not supported.")
+        return
+
+    window_title_to_find = FOLDER_MAP.get(app_name_query, app_name_query).capitalize()
+
+    try:
+        windows = gw.getWindowsWithTitle(window_title_to_find)
+        if windows:
+            for window in windows:
+                if command == "close":
+                    window.close()
+                elif command == "minimize":
+                    window.minimize()
+                elif command == "maximize":
+                    window.maximize()
+                elif command == "restore":
+                    window.restore()
+            speak(f"Action '{command}' executed on '{window_title_to_find}'.")
+        else:
+            speak(f"No windows found for '{window_title_to_find}'.")
+    except Exception as e:
+        speak(f"Failed to control '{window_title_to_find}': {e}")
+        print(f"Error in app_control: {e}")
+
+def _handle_exit():
+    """Handles the 'exit' action."""
+    speak("Goodbye!")
+    beep_ok()
+    sys.exit(0)
+
+# ---------- ENHANCED EXECUTION (dispatcher) ----------
+def execute(action, params):
+    """Enhanced execution with better error handling and persistence"""
+    
+    try:
+        if action == "open_app":
+            _handle_open_app(params)
+        elif action == "open_folder":
+            _handle_open_folder(params)
+        elif action == "open_subfolder":
+            _handle_open_subfolder(params)
+        elif action == "go_back":
+            _handle_go_back()
+        elif action == "list_files":
+            _handle_list_files(params)
+        elif action == "open_file":
+            _handle_open_file(params)
+        elif action == "move_file":
+            _handle_move_file(params)
+        elif action == "delete_file":
+            _handle_delete_file(params)
+        elif action == "restore_file":
+            _handle_restore_file(params)
+        elif action == "undo_last_operation":
+            _handle_undo_last_operation()
+        elif action == "shutdown":
+            _handle_shutdown()
+        elif action == "restart":
+            _handle_restart()
+        elif action == "screenshot":
+            _handle_screenshot(params)
+        elif action == "youtube_search":
+            _handle_youtube_search(params)
+        elif action == "youtube_control":
+            _handle_youtube_control(params)
         elif action == "web_search":
-            query = params.get("query", "")
-            webbrowser.open(f"https://www.google.com/search?q={query}")
-            speak(f"Searching for {query}")
-        
-        # APP CONTROL
+            _handle_web_search(params)
         elif action == "app_control":
-            app_name_query = params.get("app", context.get("last_app", "")).strip().lower()
-            command = params.get("command", "").strip().lower()
-
-            if not app_name_query:
-                speak("Please specify which application to control.")
-                return
-            if not command in ["close", "minimize", "maximize", "restore"]:
-                speak(f"Command '{command}' is not supported.")
-                return
-
-            # Map folder aliases like "downloads" to their proper window title "Downloads"
-            window_title_to_find = FOLDER_MAP.get(app_name_query, app_name_query).capitalize()
-
-            try:
-                # Find all windows that contain the title
-                windows = gw.getWindowsWithTitle(window_title_to_find)
-                if windows:
-                    for window in windows:
-                        # Perform the action on each window found
-                        if command == "close":
-                            window.close()
-                        elif command == "minimize":
-                            window.minimize()
-                        elif command == "maximize":
-                            window.maximize()
-                        elif command == "restore":
-                            window.restore()
-                    speak(f"Action '{command}' executed on '{window_title_to_find}'.")
-                else:
-                    speak(f"No windows found for '{window_title_to_find}'.")
-            except Exception as e:
-                speak(f"Failed to control '{window_title_to_find}': {e}")
-                print(f"Error in app_control: {e}")
-        
-        # EXIT
+            _handle_app_control(params)
         elif action == "exit":
-            speak("Goodbye!")
-            beep_ok()
-            sys.exit(0)
-        
+            _handle_exit()
         else:
             beep_err()
             speak("Command not recognized.")
@@ -1538,7 +1565,7 @@ def execute(action, params):
 def listen_and_execute_loop():
     """Optimized main loop with better error recovery"""
     r = sr.Recognizer()
-    r.energy_threshold = 4000  # Optimize for better recognition
+    r.energy_threshold = 4000
     r.dynamic_energy_threshold = True
     
     consecutive_errors = 0
@@ -1546,7 +1573,6 @@ def listen_and_execute_loop():
 
     while True:
         try:
-            # Try noise-reduced recording first
             audio_arr, sr_hz = record_with_noise_suppression(duration=5)
             
             if audio_arr is not None:
@@ -1554,7 +1580,6 @@ def listen_and_execute_loop():
                 beep_ok()
                 command = r.recognize_google(audio_clean)
             else:
-                # Fallback to standard microphone
                 with sr.Microphone() as source:
                     print("🎤 Listening (fallback)...")
                     r.adjust_for_ambient_noise(source, duration=0.3)
@@ -1563,16 +1588,14 @@ def listen_and_execute_loop():
                 command = r.recognize_google(audio)
 
             print(f"You said: {command}")
-            consecutive_errors = 0  # Reset error counter
+            consecutive_errors = 0
 
-            # Parse command
             result = parse_command_online(command)
             if not result or result.get("action") == "unknown":
                 result = fallback_parser(command)
 
             print(f"Parsed: {result}")
             
-            # Execute command
             if result.get("action") != "unknown":
                 execute(result.get("action"), result.get("params", {}))
             else:
